@@ -421,11 +421,14 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
 
     return train_pairs, val_pairs
 
-def get_filename_with_min_val_loss(directory):
+def get_filename_with_min_val_loss(directory, model_string):
     import re
     # Define the pattern to match filenames
     pattern = r'model-epoch=(\d+)-val_loss=([\d.]+)'
-    # Initialize variables to store the minimum validation loss and corresponding filename
+    # pattern = r'model-\d{4}-\d{4}-epoch=(\d+)-val_loss=([\d.]+)' # for future use
+    if model_string != '':
+        pattern = rf'model-{model_string}-epoch=(\d+)-val_loss=([\d.]+)'
+
     min_val_loss = float('inf')
     best_model_filename = None
     # Iterate over files in the directory
@@ -471,19 +474,20 @@ def objective():
     hostname = socket.gethostname()
     if hostname == 'samue':
         project_dir = r"C:\\Users\\samue\\OneDrive - Georgia Institute of Technology\\GT Files\\ECE 8903 I02\\SamuelCode\\HypovolemiaSamuel"
+        data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\Samuel Liu\\HypovolemiaSamuel\\Data"
     elif hostname == 'jarvis':
         project_dir = "/home/sliu/Desktop/SamuelCode/bvds/HypovolemiaSamuel"
+        data_dir = "/home/sliu/Desktop/Data"
     else:
         raise ValueError("Unknown environment")
 
-    # this is the location of the data
-    data_dir = os.path.join(project_dir, 'Data')
+    mode = 'train'   # train or test
+    bvds_model_str = '0725-0207' # string representing autoregressor model ran with specific architecture. for example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
+    autoreg_model_str = '' # string representing bvds model ran with specific architecture.
 
-    mode = 'test'   # train or test
     # train - trains the model and saves the best model in terms of validation loss
     # test - loads the model with the minimum loss inside Model directory
-    # while loading be careful - current code looks at minimum loss model which might belong to
-    # an earlier version of the model (with different layers, parameters etc.) - this might be updated
+    # while loading be careful - current code looks at minimum loss model 
 
     training_mode = 'regression'  # regression or classification
     # regression maps to [0, 100] interval
@@ -526,6 +530,8 @@ def objective():
         # M: length of forecast/
 
     if mode == 'train':
+        #model run name timestamp for easy access
+        model_run_str = time.strftime("%m%d-%H%M")
         for test_pig_num in test_pig_nums:
             print(f"Training for Pig {test_pig_num} Started")
             # where you save your model
@@ -540,7 +546,7 @@ def objective():
 
             checkpoint_callback = ModelCheckpoint(
                 dirpath=model_output_dir,
-                filename='model-{epoch:02d}-{val_loss:.2f}',
+                filename='model-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
                 monitor='val_loss',   # we want to save the model based on validation loss
                 mode='min',   # we want to minimize validation loss
                 save_top_k=1
@@ -550,7 +556,7 @@ def objective():
 
             autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path = get_filename_with_min_val_loss(autoreg_model_dir)
+            checkpoint_path = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str)
             autoreg_model = RNNAutoregressor.load_from_checkpoint(checkpoint_path)
 
             autoreg_model.eval()
@@ -592,7 +598,7 @@ def objective():
             model_output_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
             print(f"Testing for Pig {test_pig_num} Started")
-            checkpoint_path = get_filename_with_min_val_loss(model_output_dir)
+            checkpoint_path = get_filename_with_min_val_loss(model_output_dir, bvds_model_str)
             print("Called model checkpoint path: ", checkpoint_path)
                     
             data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
@@ -611,7 +617,7 @@ def objective():
 
             autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path = get_filename_with_min_val_loss(autoreg_model_dir)
+            checkpoint_path = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str)
             autoreg_model = RNNAutoregressor.load_from_checkpoint(checkpoint_path)
 
             autoreg_model.eval()
@@ -642,7 +648,7 @@ def objective():
 
             bvds_model_dir = os.path.join(project_dir, 'Models', 'DownstreamModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path = get_filename_with_min_val_loss(bvds_model_dir)
+            checkpoint_path = get_filename_with_min_val_loss(bvds_model_dir, bvds_model_str)
             model = BVDSRegressor.load_from_checkpoint(checkpoint_path)
             model.eval()
             trainer = L.Trainer()
@@ -682,10 +688,10 @@ if __name__ == "__main__":
         "method": "random",
         "metric": {"goal": "minimize", "name": "val_loss"},
         "parameters": {
-            "learning_rate": {"values": [0.0007, 0.0001, .0004]},
+            "learning_rate": {"values": [0.0007, 0.001]},
             "weight_decay": {"values": [0.0001, 0, .0005]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [256, 128]},
+            "hidden_size": {"values": [128]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
             "forecast_size": {"values": [10]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
@@ -694,7 +700,7 @@ if __name__ == "__main__":
             "dropout": {"values": [.1, .25]},
         },
     }
-    perform_sweep = True #change to True if want to run sweep of parameters
+    perform_sweep = False #change to True if want to run sweep of parameters
 
     hostname = socket.gethostname()
     wandbproject = "DownstreamBVDS"
@@ -704,16 +710,16 @@ if __name__ == "__main__":
         wandb.agent(sweep_id, function=objective, count=10)
     else:
         wandb.init(project=wandbproject, config={
-            "learning_rate": 0.0004,
-            "weight_decay": 0.0005,
+            "learning_rate": 0.0001,
+            "weight_decay": 0.000,
             "l1_lambda": 0.00,
             "hidden_size": 128,
-            "forecast_size": 20,
+            "forecast_size": 10,
             "overlap": 0.9,
             "epochs": 40,
             "hidden_layer": 64,
             "num_layers": 2,
-            "dropout": 0.25,
+            "dropout": 0.1,
         }, save_code=True)
         objective()
 

@@ -63,17 +63,20 @@ class MyProgressBar(L.pytorch.callbacks.TQDMProgressBar):
         return bar
 
 class TimeSeriesDataset(Dataset):
-    def __init__(self, features, labels, hypo_stages):
+    def __init__(self, features, labels, hypo_stages, labels_forward, labels_backward):
         self.features = features
         self.labels = labels
         self.hypo_stages = hypo_stages
+        self.labels_forward = labels_forward
+        self.labels_backward = labels_backward
         #labels_forward, labels_backward?
     def __len__(self):
         return len(self.features)
     def __getitem__(self, idx): #add arg for forwards/backwards?
         return torch.from_numpy(self.features[idx]).type(torch.FloatTensor), \
                torch.from_numpy(self.labels[idx]).type(torch.FloatTensor), #.cuda() on both return statements?
-                #make this conditional?
+
+                #make this conditional? confused on how to make this work with separate loops forwards/backwards
     
 class RNNAutoregressor(L.LightningModule):
     def __init__(self, test_pig, in_channels, hidden_size, forecast_size, output_size, hidden_layer, num_layers,
@@ -309,8 +312,6 @@ class MyDataModule(L.LightningDataModule):
                 self.data_dict[pig_idx][hypovolemia_stage]['labels'] = labels
         # now split
         self.prepare_train_val_test()
-        # now save if enabled
-        # save if enabled
 
     def set_prediction_mode(self, mode):
         self.prediction_mode = mode
@@ -322,10 +323,12 @@ class MyDataModule(L.LightningDataModule):
         print("pig for testing: ", self.test_pig_num)
         train_X = np.empty((0, self.window_size, len(feature_names)))
         train_y = np.empty((0, 2, self.forecast_size, len(feature_names)))
-        # train_y_f, train_y_b
+        train_y_f = np.empty((0, self.forecast_size, len(feature_names)))
+        train_y_b = np.empty((0, self.forecast_size, len(feature_names)))
         val_X = np.empty((0, self.window_size, len(feature_names)))
         val_y = np.empty((0, 2, self.forecast_size, len(feature_names)))
-        # val_y_f, val_y_b
+        val_y_f = np.empty((0, self.forecast_size, len(feature_names)))
+        val_y_b = np.empty((0, self.forecast_size, len(feature_names)))
         train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
 
         # training
@@ -339,7 +342,9 @@ class MyDataModule(L.LightningDataModule):
                                                                            forecast_size=self.forecast_size)
             train_X = np.vstack((train_X, ts_features))
             train_y = np.vstack((train_y, ts_labels.reshape(-1, 2, self.forecast_size, len(feature_names))))
-            # train_y_f, b
+            train_y_f = np.vstack((train_y_f, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            train_y_b = np.vstack((train_y_b, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+
         # validation
         for pair in val_pairs:
             (pig_idx, hypovolemia_stage) = pair
@@ -351,11 +356,15 @@ class MyDataModule(L.LightningDataModule):
                                                                            forecast_size=self.forecast_size)
             val_X = np.vstack((val_X, ts_features))
             val_y = np.vstack((val_y, ts_labels.reshape(-1, 2, self.forecast_size, len(feature_names))))
-            # val_y_f, b
+            val_y_f = np.vstack((val_y_f, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            val_y_b = np.vstack((val_y_b, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+
         # for the test pig
         test_X = np.empty((0, self.window_size, len(feature_names)))
         test_y = np.empty((0, 2, self.forecast_size, len(feature_names)))
-        # test_y_f, test_y_b
+        test_y_f = np.empty((0, self.forecast_size, len(feature_names)))
+        test_y_b = np.empty((0, self.forecast_size, len(feature_names)))
+
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
             features = self.data_dict[self.test_pig_num][hypovolemia_stage]['features']
@@ -368,14 +377,16 @@ class MyDataModule(L.LightningDataModule):
 
             test_X = np.vstack((test_X, ts_features))
             test_y = np.vstack((test_y, ts_labels.reshape(-1, 2, self.forecast_size, len(feature_names))))
+            test_y_f = np.vstack((test_y_f, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            test_y_b = np.vstack((test_y_b, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
             #test_y_f, b
         self.test_hypo_stages = np.array(self.test_hypo_stages)
         print("Train x shape: ", train_X.shape)
-        print("Train y shape: ", train_y.shape)
+        print("Train y shape: ", train_y_f.shape)
         print("Val x shape: ", val_X.shape)
-        print("Val y shape: ", val_y.shape)
+        print("Val y shape: ", val_y_f.shape)
         print("Test x shape: ", test_X.shape)
-        print("Test y shape: ", test_y.shape)
+        print("Test y shape: ", test_y_f.shape)
         print("Test hypo stages length: ", self.test_hypo_stages.shape)
 
         mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
@@ -383,15 +394,21 @@ class MyDataModule(L.LightningDataModule):
         val_X_std = (val_X - mean) / std
         test_X_std = (test_X - mean) / std
 
-        # #unsure if this is necessary, but trying since it was not standardized y-output:
         train_Y_std = (train_y - mean) / std
         val_Y_std = (val_y - mean) / std
         test_Y_std = (test_y - mean) / std   
+
+        train_Y_f_std = (train_y_f - mean) / std
+        val_Y_f_std = (val_y_f - mean) / std
+        test_Y_f_std = (test_y_f - mean) / std  
+        train_Y_b_std = (train_y_b - mean) / std
+        val_Y_b_std = (val_y_b - mean) / std
+        test_Y_b_std = (test_y_b - mean) / std  
         #repeat forwards, backwards   
 
-        self.train = TimeSeriesDataset(train_X_std, train_Y_std, [])
-        self.validate = TimeSeriesDataset(val_X_std, val_Y_std, [])
-        self.test = TimeSeriesDataset(test_X_std, test_Y_std, self.test_hypo_stages)
+        self.train = TimeSeriesDataset(train_X_std, train_Y_std, [], train_Y_f_std, train_Y_b_std)
+        self.validate = TimeSeriesDataset(val_X_std, val_Y_std, [], val_Y_f_std, val_Y_b_std)
+        self.test = TimeSeriesDataset(test_X_std, test_Y_std, self.test_hypo_stages, test_Y_f_std, test_Y_b_std)
 
     def train_dataloader(self):
         return DataLoader(self.train, batch_size=self.batch_size, shuffle=True)
@@ -491,7 +508,7 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
 def get_filename_with_min_val_loss(directory):
     import re
     # Define the pattern to match filenames
-    pattern = r'model-epoch=(\d+)-val_loss=([\d.]+)'
+    pattern = r'model-\d{4}-\d{4}-epoch=(\d+)-val_loss=([\d.]+)'
     # Initialize variables to store the minimum validation loss and corresponding filename
     min_val_loss = float('inf')
     best_model_filename = None
@@ -544,7 +561,7 @@ def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode):
     plt.tight_layout()
 
     # Save the plot to a temporary file
-    timestr = time.strftime("%Y%m%d-%H%M%S")
+    timestr = time.strftime("%m%d-%H%M%S")
     plt_path = f"plots//{mode}_pig{test_pig}_{epoch}_{timestr}.png"
     fig.savefig(plt_path)
     plt.close()
@@ -618,6 +635,8 @@ def objective():
 
     if mode == 'train':
         running_loss = []
+        #model run name timestamp for easy access
+        model_run_str = time.strftime("%m%d-%H%M")
         for test_pig_num in test_pig_nums:
             print(f"Training for Pig {test_pig_num} Started")
             # where you save your model
@@ -632,7 +651,7 @@ def objective():
 
             checkpoint_callback = ModelCheckpoint(
                 dirpath=model_output_dir,
-                filename='model-{epoch:02d}-{val_loss:.2f}',
+                filename='model-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
                 monitor='val_loss',   # we want to save the model based on validation loss
                 mode='min',   # we want to minimize validation loss
                 save_top_k=1
@@ -677,8 +696,6 @@ def objective():
             # we do not want to return predictions that are out of bounds
             predictions[predictions > 100] = 100
             predictions[predictions < 0] = 0
-            print(f"Pig {test_pig_num} results")
-            report_results(gt_data, predictions, data_module.test_hypo_stages, results, test_pig_num)
             print()
         
         # now all median loss
@@ -726,7 +743,7 @@ if __name__ == "__main__":
             "hidden_size": 128,
             "forecast_size": 20,
             "overlap": 0.9,
-            "epochs": 40,
+            "epochs": 1,
             "hidden_layer": 48, #keep at zero unless multiple fc layers in decoder wanted
             "num_layers": 1,
             "dropout": 0.25
