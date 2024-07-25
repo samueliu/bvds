@@ -689,7 +689,7 @@ if __name__ == "__main__":
         "metric": {"goal": "minimize", "name": "val_loss"},
         "parameters": {
             "learning_rate": {"values": [0.0007, 0.001]},
-            "weight_decay": {"values": [0.0001, 0, .0005]},
+            "weight_decay": {"values": [0, .0005]},
             "l1_lambda": {"values": [0]},
             "hidden_size": {"values": [128]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
             "forecast_size": {"values": [10]},
@@ -697,10 +697,10 @@ if __name__ == "__main__":
             "epochs": {"values": [40]},
             "hidden_layer": {"values": [0, 64]},
             "num_layers": {"values": [1, 2]},
-            "dropout": {"values": [.1, .25]},
+            "dropout": {"values": [.1, 0]},
         },
     }
-    perform_sweep = False #change to True if want to run sweep of parameters
+    perform_sweep = True #change to True if want to run sweep of parameters
 
     hostname = socket.gethostname()
     wandbproject = "DownstreamBVDS"
