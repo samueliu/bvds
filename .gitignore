@@ -1,0 +1,6 @@
+#ignore all files with a .log extension
+*.log
+lightning_logs/
+plots/
+*.png
+wandb/
