@@ -63,24 +63,22 @@ class MyProgressBar(L.pytorch.callbacks.TQDMProgressBar):
         return bar
 
 class TimeSeriesDataset(Dataset):
-    def __init__(self, features, labels, hypo_stages, labels_forward, labels_backward):
+    def __init__(self, features, labels, hypo_stages):
         self.features = features
         self.labels = labels
         self.hypo_stages = hypo_stages
-        self.labels_forward = labels_forward
-        self.labels_backward = labels_backward
-        #labels_forward, labels_backward?
     def __len__(self):
         return len(self.features)
     def __getitem__(self, idx): #add arg for forwards/backwards?
         return torch.from_numpy(self.features[idx]).type(torch.FloatTensor), \
-               torch.from_numpy(self.labels[idx]).type(torch.FloatTensor), #.cuda() on both return statements?
+               torch.from_numpy(self.labels[idx]).type(torch.FloatTensor)
 
-                #make this conditional? confused on how to make this work with separate loops forwards/backwards
+        # return torch.from_numpy(self.features[idx]).type(torch.FloatTensor).cuda(), \
+        #        torch.from_numpy(self.labels[idx]).type(torch.FloatTensor).cuda()
     
 class RNNAutoregressor(L.LightningModule):
     def __init__(self, test_pig, in_channels, hidden_size, forecast_size, output_size, hidden_layer, num_layers,
-                  learning_rate, weight_decay, l1_lambda, dropout, device_to_use, max_epochs, running_loss, **kwargs):
+                  learning_rate, weight_decay, l1_lambda, dropout, device_to_use, max_epochs, running_loss, direction, **kwargs):
         super().__init__()
         self.save_hyperparameters()
         self.test_pig = test_pig
@@ -93,80 +91,67 @@ class RNNAutoregressor(L.LightningModule):
         self.hidden_layer = hidden_layer
         self.num_layers = num_layers
         self.running_loss = running_loss
+        self.direction = direction
 
-        self.encoder_forward = Encoder_Forward(in_channels, hidden_size, num_layers)
-        self.decoder_forward = Decoder_Forward(hidden_size, output_size, hidden_layer, dropout, num_layers)
-        self.encoder_backward = Encoder_Backward(in_channels, hidden_size, num_layers)
-        self.decoder_backward = Decoder_Backward(hidden_size, output_size, hidden_layer, dropout, num_layers)
+        self.encoder = Encoder(in_channels, hidden_size, num_layers)
+        self.decoder = Decoder(hidden_size, output_size, hidden_layer, dropout, num_layers)
 
         self.loss_fn = nn.MSELoss()
 
     def forward(self, x):
         # encode the input sequence
-        encoded_out_f, (hn, cn) = self.encoder_forward(x)
-        repeated_out_f = encoded_out_f[:, -1, :].unsqueeze(1).repeat(1, self.forecast_size, 1) 
-
-        encoded_out_b, (hn, cn) = self.encoder_backward(x)
-        repeated_out_b = encoded_out_b[:, -1, :].unsqueeze(1).repeat(1, self.forecast_size, 1) 
+        encoded_out, (hn, cn) = self.encoder(x)
+        repeated_out = encoded_out[:, -1, :].unsqueeze(1).repeat(1, self.forecast_size, 1) 
 
         # decode repeated output
-        forecast_out, _ = self.decoder_forward(repeated_out_f)
-        backcast_out, _ = self.decoder_backward(repeated_out_b)
+        reconstructed_out, _ = self.decoder(repeated_out)
         
-        return forecast_out, backcast_out
+        return reconstructed_out
     
     #only encodes; this is used for bvds downstream task
     def encode(self, x):
-        encoder_out_f, _ = self.encoder_forward(x)
-        encoded_out_f = encoder_out_f[:, -1, :].unsqueeze(1)
-        encoder_out_b, _ = self.encoder_backward(x)
-        encoded_out_b = encoder_out_b[:, -1, :].unsqueeze(1)
-        encoded_out = torch.stack((encoded_out_f, encoded_out_b), dim=1)
+        encoder_out, _ = self.encoder(x)
+        encoded_out = encoder_out[:, -1, :].unsqueeze(1)
 
         return encoded_out
 
     def training_step(self, batch, batch_idx):
         x, y = batch
         x, y = x.to(self.device_to_use), y.to(self.device_to_use)
-        x_hat_f, x_hat_b = self(x) #runs through fc layers, results in x_hat=(N,2,M,F)
-        x_hat = torch.stack((x_hat_b, x_hat_f), dim=1)
+        x_hat = self(x) #runs through fc layers, results in x_hat=(N,2,M,F)
 
-        loss_f = self.loss_fn(x_hat[:,1,:,:], y[:, 1])
-        loss_b = self.loss_fn(x_hat[:,0,:,:], y[:, 0])
-        loss = (loss_f + loss_b) / 2
+        loss = self.loss_fn(x_hat, y)
 
         l1_loss = sum(torch.sum(torch.abs(param)) for param in self.parameters())
         loss += self.l1_lambda * l1_loss
 
-        self.log(f'train_loss_pig_{self.test_pig}', loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(f'train_loss_pig_{self.test_pig}_{self.direction}', loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('train_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
 
         if batch_idx == 0 and self.current_epoch > self.epochs - 2:
             frame_index = random.randint(0, x.size(0) - 1)
             features = [0, 1, 8, 9]
-            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'train')
+            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'train', self.direction)
         
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch # x=(N,T,F) y=(N,2,M,F)
         x, y = x.to(self.device), y.to(self.device)
-        x_hat_f, x_hat_p = self(x) #runs through fc layers
-        x_hat = torch.stack((x_hat_p, x_hat_f), dim=1)
+        x_hat = self(x) #runs through fc layers
         loss = self.loss_fn(x_hat, y) 
-        self.log(f'val_loss_pig_{self.test_pig}', loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(f'val_loss_pig_{self.test_pig}_{self.direction}', loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('val_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
 
         if batch_idx == 0 and self.current_epoch > self.epochs - 2:
             frame_index = random.randint(0, x.size(0) - 1) #is seeding needed here or something?
             features = [0, 1, 8, 10]
             self.running_loss.append(loss)
-            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'val')
+            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'val', self.direction)
             if self.test_pig == 6:
                 self.log(f'mean_val_loss', sum(self.running_loss)/len(self.running_loss), prog_bar=False, on_step=False, on_epoch=True)
 
         return loss
-
 
     # # Prediction step for reconstruction (commented out)
     # def predict_step(self, batch, batch_idx):
@@ -186,9 +171,9 @@ class RNNAutoregressor(L.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay) #adjust learning rate here
         return optimizer
     
-class Encoder_Forward(nn.Module):
+class Encoder(nn.Module):
     def __init__(self, in_channels, hidden_size, num_layers):
-        super(Encoder_Forward, self).__init__()
+        super(Encoder, self).__init__()
         self.lstm1 = nn.LSTM(input_size=in_channels, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -200,9 +185,9 @@ class Encoder_Forward(nn.Module):
 
         return out1, (hn1, cn1)
         
-class Decoder_Forward(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, hidden_size, output_size, hidden_layer, dropout, num_layers):
-        super(Decoder_Forward, self).__init__()
+        super(Decoder, self).__init__()
         self.lstm1 = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
         if hidden_layer == 0:
             self.fc = nn.Sequential(
@@ -228,52 +213,10 @@ class Decoder_Forward(nn.Module):
 
         return out, (hn1, cn1)
     
-class Encoder_Backward(nn.Module):
-    def __init__(self, in_channels, hidden_size, num_layers):
-        super(Encoder_Backward, self).__init__()
-        self.lstm1 = nn.LSTM(input_size=in_channels, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-    def forward(self, x):
-        h0_lstm1 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0_lstm1 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out1, (hn1, cn1) = self.lstm1(x, (h0_lstm1, c0_lstm1))
-
-        return out1, (hn1, cn1)
-        
-class Decoder_Backward(nn.Module):
-    def __init__(self, hidden_size, output_size, hidden_layer, dropout, num_layers):
-        super(Decoder_Backward, self).__init__()
-        self.lstm1 = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
-        if hidden_layer == 0:
-            self.fc = nn.Sequential(
-                nn.Linear(hidden_size, output_size),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            )
-        else:
-            self.fc = nn.Sequential(
-                nn.Linear(hidden_size, hidden_layer),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_layer, output_size)
-            )
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-    def forward(self, x):
-        h0_lstm1 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0_lstm1 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out1, (hn1, cn1) = self.lstm1(x, (h0_lstm1, c0_lstm1))
-        out = self.fc(out1)
-
-        return out, (hn1, cn1)
-
 class MyDataModule(L.LightningDataModule):
     def __init__(self, data_directory, num_pigs, test_pig_num, bvds_mode,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15):
+                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15, direction=0): #direction 0=backwards, 1=forwards
         super().__init__()
         # train/test_hypovolemia_stages = ['Absolute', 'Relative', 'Resuscitation']
         # these are here in case you want to train/test your model using certain stages
@@ -290,6 +233,7 @@ class MyDataModule(L.LightningDataModule):
         self.window_size = window_size   # how many time steps you want in a single window
         self.forecast_size = forecast_size # how many samples you want to predict in the future/past
         self.prediction_mode = 'train'
+        self.direction = direction
 
     def prepare_data(self):
         pass
@@ -322,13 +266,9 @@ class MyDataModule(L.LightningDataModule):
         print("pigs for training: ", pigs_for_training)
         print("pig for testing: ", self.test_pig_num)
         train_X = np.empty((0, self.window_size, len(feature_names)))
-        train_y = np.empty((0, 2, self.forecast_size, len(feature_names)))
-        train_y_f = np.empty((0, self.forecast_size, len(feature_names)))
-        train_y_b = np.empty((0, self.forecast_size, len(feature_names)))
+        train_y = np.empty((0, self.forecast_size, len(feature_names)))
         val_X = np.empty((0, self.window_size, len(feature_names)))
-        val_y = np.empty((0, 2, self.forecast_size, len(feature_names)))
-        val_y_f = np.empty((0, self.forecast_size, len(feature_names)))
-        val_y_b = np.empty((0, self.forecast_size, len(feature_names)))
+        val_y = np.empty((0, self.forecast_size, len(feature_names)))
         train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
 
         # training
@@ -339,11 +279,9 @@ class MyDataModule(L.LightningDataModule):
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size)
+                                                                           forecast_size=self.forecast_size, direction=self.direction)
             train_X = np.vstack((train_X, ts_features))
-            train_y = np.vstack((train_y, ts_labels.reshape(-1, 2, self.forecast_size, len(feature_names))))
-            train_y_f = np.vstack((train_y_f, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
-            train_y_b = np.vstack((train_y_b, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
         # validation
         for pair in val_pairs:
@@ -353,17 +291,13 @@ class MyDataModule(L.LightningDataModule):
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size)
+                                                                           forecast_size=self.forecast_size, direction=self.direction)
             val_X = np.vstack((val_X, ts_features))
-            val_y = np.vstack((val_y, ts_labels.reshape(-1, 2, self.forecast_size, len(feature_names))))
-            val_y_f = np.vstack((val_y_f, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
-            val_y_b = np.vstack((val_y_b, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
         # for the test pig
         test_X = np.empty((0, self.window_size, len(feature_names)))
-        test_y = np.empty((0, 2, self.forecast_size, len(feature_names)))
-        test_y_f = np.empty((0, self.forecast_size, len(feature_names)))
-        test_y_b = np.empty((0, self.forecast_size, len(feature_names)))
+        test_y = np.empty((0, self.forecast_size, len(feature_names)))
 
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
@@ -372,21 +306,15 @@ class MyDataModule(L.LightningDataModule):
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size)
+                                                                           forecast_size=self.forecast_size, direction=self.direction)
             self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
 
             test_X = np.vstack((test_X, ts_features))
-            test_y = np.vstack((test_y, ts_labels.reshape(-1, 2, self.forecast_size, len(feature_names))))
-            test_y_f = np.vstack((test_y_f, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
-            test_y_b = np.vstack((test_y_b, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
-            #test_y_f, b
+            test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
         print("Train x shape: ", train_X.shape)
-        print("Train y shape: ", train_y_f.shape)
         print("Val x shape: ", val_X.shape)
-        print("Val y shape: ", val_y_f.shape)
         print("Test x shape: ", test_X.shape)
-        print("Test y shape: ", test_y_f.shape)
         print("Test hypo stages length: ", self.test_hypo_stages.shape)
 
         mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
@@ -398,17 +326,9 @@ class MyDataModule(L.LightningDataModule):
         val_Y_std = (val_y - mean) / std
         test_Y_std = (test_y - mean) / std   
 
-        train_Y_f_std = (train_y_f - mean) / std
-        val_Y_f_std = (val_y_f - mean) / std
-        test_Y_f_std = (test_y_f - mean) / std  
-        train_Y_b_std = (train_y_b - mean) / std
-        val_Y_b_std = (val_y_b - mean) / std
-        test_Y_b_std = (test_y_b - mean) / std  
-        #repeat forwards, backwards   
-
-        self.train = TimeSeriesDataset(train_X_std, train_Y_std, [], train_Y_f_std, train_Y_b_std)
-        self.validate = TimeSeriesDataset(val_X_std, val_Y_std, [], val_Y_f_std, val_Y_b_std)
-        self.test = TimeSeriesDataset(test_X_std, test_Y_std, self.test_hypo_stages, test_Y_f_std, test_Y_b_std)
+        self.train = TimeSeriesDataset(train_X_std, train_Y_std, [])
+        self.validate = TimeSeriesDataset(val_X_std, val_Y_std, [])
+        self.test = TimeSeriesDataset(test_X_std, test_Y_std, self.test_hypo_stages)
 
     def train_dataloader(self):
         return DataLoader(self.train, batch_size=self.batch_size, shuffle=True)
@@ -425,7 +345,7 @@ class MyDataModule(L.LightningDataModule):
             return DataLoader(self.test, batch_size=self.batch_size, shuffle=False)
 
 
-def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_percentage, forecast_size):
+def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_percentage, forecast_size, direction):
     """
     Creates a timeseries dataset from the given data along with corresponding labels.
 
@@ -459,9 +379,11 @@ def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_perc
         start_idx = i * step_size + forecast_size # leave room for backwards casting
         end_idx = start_idx + time_steps 
         window_data = data[start_idx:end_idx]
-        before_labels = labels[start_idx - forecast_size:start_idx]
-        after_labels = labels[end_idx:end_idx + forecast_size]
-        window_labels = np.stack((before_labels, after_labels), axis=0)
+
+        if direction == 0: #backwards = 0
+            window_labels = labels[start_idx - forecast_size:start_idx]
+        else: #forwards direction = 1
+            window_labels = labels[end_idx:end_idx + forecast_size]
 
         valid_windows.append(window_data)
         valid_labels.append(window_labels)
@@ -531,7 +453,7 @@ def get_filename_with_min_val_loss(directory):
         print("No model files found in the directory.")
     return best_model_path
 
-def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode):
+def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, direction):
     if len(features) > 4:
         features = features[0:3] #only plots max 4 features
 
@@ -539,19 +461,20 @@ def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode):
 
     for i in range(len(features)):
         feature_index = features[i]
-        reconstruct_f = x_hat[frame_index, 1, :, feature_index].cpu().detach().numpy()
-        actual_f = y[frame_index, 1, :, feature_index].cpu().detach().numpy()
-        reconstruct_b = x_hat[frame_index, 0, :, feature_index].cpu().detach().numpy()
-        actual_b = y[frame_index, 0, :, feature_index].cpu().detach().numpy()
+        reconstruct = x_hat[frame_index, :, feature_index].cpu().detach().numpy()
+        actual = y[frame_index, :, feature_index].cpu().detach().numpy()
         window = x[frame_index, :, feature_index].cpu().detach().numpy()
 
-        actual = np.concatenate((actual_b, window, actual_f))
-        backcast = np.pad(reconstruct_b, (0, len(actual) - len(actual_b)), 'constant', constant_values=np.nan)
-        forecast = np.pad(reconstruct_f, (len(actual) - len(actual_f), 0), 'constant', constant_values=np.nan)
+        if direction == 0:
+            full_window = np.concatenate((actual, window))
+            cast = np.pad(reconstruct, (0, len(full_window) - len(actual)), 'constant', constant_values=np.nan)
+            axs[i].plot(cast, label='Predicted Backcast', color='red', linestyle='dashed')
+        else:
+            full_window = np.concatenate((window, actual))
+            cast = np.pad(reconstruct, (len(full_window) - len(actual), 0), 'constant', constant_values=np.nan)
+            axs[i].plot(cast, label='Predicted Forecast', color='red', linestyle='dashed')
 
-        axs[i].plot(actual, label='Actual', color='blue')
-        axs[i].plot(backcast, label='Predicted Backcast', color='red', linestyle='dashed')
-        axs[i].plot(forecast, label='Predicted Forecast', color='red', linestyle='dashed')
+        axs[i].plot(full_window, label='Actual', color='blue')
         axs[i].set_title(f'Sample Predicted vs Actual for Epoch {epoch}, Feature: {feature_index}')
         axs[i].set_xlabel('Time Step')
         axs[i].set_ylabel('Value')
@@ -562,12 +485,12 @@ def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode):
 
     # Save the plot to a temporary file
     timestr = time.strftime("%m%d-%H%M%S")
-    plt_path = f"plots//{mode}_pig{test_pig}_{epoch}_{timestr}.png"
+    plt_path = f"plots//{mode}_pig{test_pig}_{direction}_{epoch}_{timestr}.png"
     fig.savefig(plt_path)
     plt.close()
 
     # Log the plot to wandb
-    wandb.log({f"plots//{mode}_pig{test_pig}_{epoch}_{timestr}": wandb.Image(plt_path)})
+    wandb.log({f"plots//{mode}_pig{test_pig}_{direction}_{epoch}_{timestr}": wandb.Image(plt_path)})
 
 def objective():
 
@@ -589,8 +512,6 @@ def objective():
     mode = 'train'   # train or test
     # train - trains the model and saves the best model in terms of validation loss
     # test - loads the model with the minimum loss inside Model directory
-    # while loading be careful - current code looks at minimum loss model which might belong to
-    # an earlier version of the model (with different layers, parameters etc.) - this might be updated
 
     training_mode = 'regression'  # regression or classification
     # regression maps to [0, 100] interval
@@ -611,7 +532,6 @@ def objective():
     num_pigs = 6
     window_size = 60
     batch_size = 128
-    output_size = 24
     test_pig_nums = [1, 2, 3, 4, 5, 6]   # for each pig we will a create a different model by excluding that pig
     # some parameters we might play with
     hidden_size = config.hidden_size
@@ -644,26 +564,44 @@ def objective():
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
             if not os.path.exists(model_output_dir):
                 os.makedirs(model_output_dir)
-
-            data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+                
+            data_module_backward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
                          all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                         batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
-
-            checkpoint_callback = ModelCheckpoint(
+                         batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=0)
+            model_backward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, forecast_size=forecast_size, output_size=len(feature_names),
+                                      hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
+                                      dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=0)
+            checkpoint_callback_backward = ModelCheckpoint(
                 dirpath=model_output_dir,
-                filename='model-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
+                filename='model_b-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
+                monitor='val_loss',   # we want to save the model based on validation loss
+                mode='min',   # we want to minimize validation loss
+                save_top_k=1
+            )
+            #data_module_backward.setup() #run if not using trainer
+
+            data_module_forward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+                         all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                         batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=1)
+            model_forward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, forecast_size=forecast_size, output_size=len(feature_names),
+                                      hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
+                                      dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=1)
+            checkpoint_callback_forward = ModelCheckpoint(
+                dirpath=model_output_dir,
+                filename='model_f-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
                 monitor='val_loss',   # we want to save the model based on validation loss
                 mode='min',   # we want to minimize validation loss
                 save_top_k=1
             )
 
             wandb_logger = WandbLogger(log_model=True)
-            model = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, forecast_size=forecast_size, output_size=len(feature_names),
-                                      hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
-                                      dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss)
-            trainer = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback], max_epochs=epochs)
-            # data_module.setup() #Uncomment IF not running trainer.fit
-            trainer.fit(model, data_module)
+            #two trainers, one for backwards, one for forwards
+            trainer_backwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_backward], max_epochs=epochs)
+            trainer_backwards.fit(model_backward, data_module_backward)
+
+            trainer_forwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_forward], max_epochs=epochs)
+            trainer_forwards.fit(model_forward, data_module_forward)
+
 
     else:  # testing assuming that you have a trained model
         results = {}
@@ -717,24 +655,24 @@ if __name__ == "__main__":
         "method": "random",
         "metric": {"goal": "minimize", "name": "mean_val_loss"},
         "parameters": {
-            "learning_rate": {"values": [0.0001, .00005, .0007]},
-            "weight_decay": {"values": [0.0001, .0005]},
+            "learning_rate": {"values": [0.0001]},
+            "weight_decay": {"values": [0.00001]},
             "l1_lambda": {"values": [0, 0.00005]},
-            "hidden_size": {"values": [128, 256]},
-            "forecast_size": {"values": [10]},
+            "hidden_size": {"values": [128, 256, 64]},
+            "forecast_size": {"values": [10, 5, 20]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
-            "hidden_layer": {"values": [0, 64]},
+            "hidden_layer": {"values": [0, 64, 128]},
             "num_layers": {"values": [2]},
-            "dropout": {"values": [.25, .1, 0]},
+            "dropout": {"values": [0]}, #add window size [30, 60, 90, 10], remove dropout
         },
     }
-    perform_sweep = True #change to True if want to run sweep of parameters
+    perform_sweep = False #change to True if want to run sweep of parameters
     wandbproject = "RNNAutoregressor"
 
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=10)
+        wandb.agent(sweep_id, function=objective, count=15)
     else:
         wandb.init(project=wandbproject, config={
             "learning_rate": 0.0001,
@@ -743,9 +681,9 @@ if __name__ == "__main__":
             "hidden_size": 128,
             "forecast_size": 20,
             "overlap": 0.9,
-            "epochs": 1,
+            "epochs": 10,
             "hidden_layer": 48, #keep at zero unless multiple fc layers in decoder wanted
             "num_layers": 1,
-            "dropout": 0.25
+            "dropout": 0
         }, save_code=True)
         objective()

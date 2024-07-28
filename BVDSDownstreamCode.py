@@ -481,8 +481,8 @@ def objective():
     else:
         raise ValueError("Unknown environment")
 
-    mode = 'train'   # train or test
-    bvds_model_str = '0725-0207' # string representing autoregressor model ran with specific architecture. for example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
+    mode = 'test'   # train or test
+    bvds_model_str = '0725-0240' # string representing autoregressor model ran with specific architecture. for example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
     autoreg_model_str = '' # string representing bvds model ran with specific architecture.
 
     # train - trains the model and saves the best model in terms of validation loss
@@ -700,7 +700,7 @@ if __name__ == "__main__":
             "dropout": {"values": [.1, 0]},
         },
     }
-    perform_sweep = True #change to True if want to run sweep of parameters
+    perform_sweep = False #change to True if want to run sweep of parameters
 
     hostname = socket.gethostname()
     wandbproject = "DownstreamBVDS"
@@ -710,8 +710,8 @@ if __name__ == "__main__":
         wandb.agent(sweep_id, function=objective, count=10)
     else:
         wandb.init(project=wandbproject, config={
-            "learning_rate": 0.0001,
-            "weight_decay": 0.000,
+            "learning_rate": 0.001,
+            "weight_decay": 0.0005,
             "l1_lambda": 0.00,
             "hidden_size": 128,
             "forecast_size": 10,
@@ -719,7 +719,7 @@ if __name__ == "__main__":
             "epochs": 40,
             "hidden_layer": 64,
             "num_layers": 2,
-            "dropout": 0.1,
+            "dropout": 0,
         }, save_code=True)
         objective()
 
