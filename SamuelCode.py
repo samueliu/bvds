@@ -530,7 +530,7 @@ def objective():
         os.makedirs(result_output_dir)
 
     num_pigs = 6
-    window_size = 60
+    window_size = config.window_size
     batch_size = 128
     test_pig_nums = [1, 2, 3, 4, 5, 6]   # for each pig we will a create a different model by excluding that pig
     # some parameters we might play with
@@ -544,6 +544,7 @@ def objective():
     dropout = config.dropout
     epochs = config.epochs
     overlap = config.overlap
+    
 
     # N * T * F
         # N: batch size
@@ -656,23 +657,24 @@ if __name__ == "__main__":
         "metric": {"goal": "minimize", "name": "mean_val_loss"},
         "parameters": {
             "learning_rate": {"values": [0.0001]},
-            "weight_decay": {"values": [0.00001]},
-            "l1_lambda": {"values": [0, 0.00005]},
-            "hidden_size": {"values": [128, 256, 64]},
-            "forecast_size": {"values": [10, 5, 20]},
+            "weight_decay": {"values": [0.00001, .0007]},
+            "l1_lambda": {"values": [0]},
+            "hidden_size": {"values": [128, 256]},
+            "forecast_size": {"values": [10, 15]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
-            "hidden_layer": {"values": [0, 64, 128]},
-            "num_layers": {"values": [2]},
-            "dropout": {"values": [0]}, #add window size [30, 60, 90, 10], remove dropout
+            "hidden_layer": {"values": [128, 64]},
+            "num_layers": {"values": [1, 2]},
+            "dropout": {"values": [0]},
+            "window_size": {"values": [30, 60]},
         },
     }
-    perform_sweep = False #change to True if want to run sweep of parameters
+    perform_sweep = True #change to True if want to run sweep of parameters
     wandbproject = "RNNAutoregressor"
 
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=15)
+        wandb.agent(sweep_id, function=objective, count=16)
     else:
         wandb.init(project=wandbproject, config={
             "learning_rate": 0.0001,
@@ -684,6 +686,7 @@ if __name__ == "__main__":
             "epochs": 10,
             "hidden_layer": 48, #keep at zero unless multiple fc layers in decoder wanted
             "num_layers": 1,
-            "dropout": 0
+            "dropout": 0,
+            "window_size": 30
         }, save_code=True)
         objective()
