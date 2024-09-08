@@ -77,12 +77,13 @@ class TimeSeriesDataset(Dataset):
         #        torch.from_numpy(self.labels[idx]).type(torch.FloatTensor).cuda()
     
 class RNNAutoregressor(L.LightningModule):
-    def __init__(self, test_pig, in_channels, hidden_size, forecast_size, output_size, hidden_layer, num_layers,
+    def __init__(self, test_pig, in_channels, hidden_size, window_size, forecast_size, output_size, hidden_layer, num_layers,
                   learning_rate, weight_decay, l1_lambda, dropout, device_to_use, max_epochs, running_loss, direction, **kwargs):
         super().__init__()
         self.save_hyperparameters()
         self.test_pig = test_pig
         self.device_to_use = device_to_use
+        self.window_size = window_size
         self.forecast_size = forecast_size
         self.learning_rate = learning_rate
         self.l1_lambda = l1_lambda
@@ -101,7 +102,10 @@ class RNNAutoregressor(L.LightningModule):
     def forward(self, x):
         # encode the input sequence
         encoded_out, (hn, cn) = self.encoder(x)
-        repeated_out = encoded_out[:, -1, :].unsqueeze(1).repeat(1, self.forecast_size, 1) 
+        if self.forecast_size == 0:
+            repeated_out = encoded_out[:, -1, :].unsqueeze(1).repeat(1, self.window_size, 1) 
+        else:
+            repeated_out = encoded_out[:, -1, :].unsqueeze(1).repeat(1, self.forecast_size, 1) 
 
         # decode repeated output
         reconstructed_out, _ = self.decoder(repeated_out)
@@ -266,9 +270,14 @@ class MyDataModule(L.LightningDataModule):
         print("pigs for training: ", pigs_for_training)
         print("pig for testing: ", self.test_pig_num)
         train_X = np.empty((0, self.window_size, len(feature_names)))
-        train_y = np.empty((0, self.forecast_size, len(feature_names)))
         val_X = np.empty((0, self.window_size, len(feature_names)))
-        val_y = np.empty((0, self.forecast_size, len(feature_names)))
+        if self.forecast_size == 0:
+            train_y = np.empty((0, self.window_size, len(feature_names)))
+            val_y = np.empty((0, self.window_size, len(feature_names)))
+        else:
+            train_y = np.empty((0, self.forecast_size, len(feature_names)))
+            val_y = np.empty((0, self.forecast_size, len(feature_names)))
+
         train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
 
         # training
@@ -281,7 +290,10 @@ class MyDataModule(L.LightningDataModule):
                                                                            overlap_percentage=self.overlap_percentage,
                                                                            forecast_size=self.forecast_size, direction=self.direction)
             train_X = np.vstack((train_X, ts_features))
-            train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            if self.forecast_size == 0:
+                train_y = np.vstack((train_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
+            else:
+                train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
         # validation
         for pair in val_pairs:
@@ -293,11 +305,17 @@ class MyDataModule(L.LightningDataModule):
                                                                            overlap_percentage=self.overlap_percentage,
                                                                            forecast_size=self.forecast_size, direction=self.direction)
             val_X = np.vstack((val_X, ts_features))
-            val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            if self.forecast_size == 0:
+                val_y = np.vstack((val_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
+            else:
+                val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
         # for the test pig
         test_X = np.empty((0, self.window_size, len(feature_names)))
-        test_y = np.empty((0, self.forecast_size, len(feature_names)))
+        if self.forecast_size == 0:
+            test_y = np.empty((0, self.window_size, len(feature_names)))
+        else:
+            test_y = np.empty((0, self.forecast_size, len(feature_names)))
 
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
@@ -310,7 +328,10 @@ class MyDataModule(L.LightningDataModule):
             self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
 
             test_X = np.vstack((test_X, ts_features))
-            test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            if self.forecast_size == 0:
+                test_y = np.vstack((test_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
+            else:
+                test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
         print("Train x shape: ", train_X.shape)
         print("Val x shape: ", val_X.shape)
@@ -380,10 +401,13 @@ def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_perc
         end_idx = start_idx + time_steps 
         window_data = data[start_idx:end_idx]
 
-        if direction == 0: #backwards = 0
-            window_labels = labels[start_idx - forecast_size:start_idx]
-        else: #forwards direction = 1
-            window_labels = labels[end_idx:end_idx + forecast_size]
+        if forecast_size == 0:
+            window_labels = window_data
+        else:
+            if direction == 0: #backwards = 0
+                window_labels = labels[start_idx - forecast_size:start_idx]
+            else: #forwards direction = 1
+                window_labels = labels[end_idx:end_idx + forecast_size]
 
         valid_windows.append(window_data)
         valid_labels.append(window_labels)
@@ -545,7 +569,6 @@ def objective():
     epochs = config.epochs
     overlap = config.overlap
     
-
     # N * T * F
         # N: batch size
         # T: sequence length
@@ -569,7 +592,7 @@ def objective():
             data_module_backward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
                          all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                          batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=0)
-            model_backward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, forecast_size=forecast_size, output_size=len(feature_names),
+            model_backward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, window_size=window_size, forecast_size=forecast_size, output_size=len(feature_names),
                                       hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
                                       dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=0)
             checkpoint_callback_backward = ModelCheckpoint(
@@ -584,7 +607,7 @@ def objective():
             data_module_forward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
                          all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                          batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=1)
-            model_forward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, forecast_size=forecast_size, output_size=len(feature_names),
+            model_forward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, window_size=window_size, forecast_size=forecast_size, output_size=len(feature_names),
                                       hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
                                       dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=1)
             checkpoint_callback_forward = ModelCheckpoint(
@@ -681,7 +704,7 @@ if __name__ == "__main__":
             "weight_decay": 0.0007,
             "l1_lambda": 0.00000,
             "hidden_size": 128,
-            "forecast_size": 20,
+            "forecast_size": 20, #set forecast size to 0 for Autoencoder mode
             "overlap": 0.9,
             "epochs": 10,
             "hidden_layer": 48, #keep at zero unless multiple fc layers in decoder wanted

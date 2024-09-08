@@ -14,7 +14,7 @@ import sys
 import wandb
 import time
 import socket
-from SamuelCode import RNNAutoregressor
+from SamuelCode_LSTM import RNNAutoregressor
 from pytorch_lightning.loggers import WandbLogger
 
 # Set random seed for reproducibility
@@ -122,7 +122,7 @@ class BVDSRegressor(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch # x=(N,T,F) y=(N,2,M,F)
+        x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         x_hat = self(x) #runs through fc layers
         loss = self.loss_fn(x_hat, y) 
@@ -192,8 +192,8 @@ class MyDataModule(L.LightningDataModule):
     def prepare_train_val_test(self):
         # train dataset first
         pigs_for_training = [m+1 for m in range(self.num_pigs) if m+1 != self.test_pig_num]
-        print("pigs for training: ", pigs_for_training)
-        print("pig for testing: ", self.test_pig_num)
+        # print("pigs for training: ", pigs_for_training)
+        # print("pig for testing: ", self.test_pig_num)
         train_X = np.empty((0, self.window_size, len(feature_names)))
         train_y = np.empty((0, 1))
         val_X = np.empty((0, self.window_size, len(feature_names)))
@@ -236,13 +236,13 @@ class MyDataModule(L.LightningDataModule):
             test_X = np.vstack((test_X, ts_features))
             test_y = np.vstack((test_y, ts_labels.reshape(-1, 1)))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
-        print("Train x shape: ", train_X.shape)
-        print("Train y shape: ", train_y.shape)
-        print("Val x shape: ", val_X.shape)
-        print("Val y shape: ", val_y.shape)
-        print("Test x shape: ", test_X.shape)
-        print("Test y shape: ", test_y.shape)
-        print("Test hypo stages length: ", self.test_hypo_stages.shape)
+        # print("Train x shape: ", train_X.shape)
+        # print("Train y shape: ", train_y.shape)
+        # print("Val x shape: ", val_X.shape)
+        # print("Val y shape: ", val_y.shape)
+        # print("Test x shape: ", test_X.shape)
+        # print("Test y shape: ", test_y.shape)
+        # print("Test hypo stages length: ", self.test_hypo_stages.shape)
 
         mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
         train_X_std = (train_X - mean) / std
@@ -307,21 +307,18 @@ class DownstreamDataModule(L.LightningDataModule):
         print("pigs for training: ", pigs_for_training)
         print("pig for testing: ", self.test_pig_num)
         train_X = self.encoded_predictions_train.squeeze()
-        train_X = train_X.reshape(train_X.shape[0], train_X.shape[-1]*2)
         train_y = self.bvds_labels_train
         val_X = self.encoded_predictions_val.squeeze()
-        val_X = val_X.reshape(val_X.shape[0], val_X.shape[-1]*2)
         val_y = self.bvds_labels_val
         test_X = self.encoded_predictions_test.squeeze()
-        test_X = test_X.reshape(test_X.shape[0], test_X.shape[-1]*2)
         test_y = self.bvds_labels_test
 
-        print("Train x shape: ", train_X.shape)
-        print("Train y shape: ", train_y.shape)
-        print("Val x shape: ", val_X.shape)
-        print("Val y shape: ", val_y.shape)
-        print("Test x shape: ", test_X.shape)
-        print("Test y shape: ", test_y.shape)
+        # print("Train x shape: ", train_X.shape)
+        # print("Train y shape: ", train_y.shape)
+        # print("Val x shape: ", val_X.shape)
+        # print("Val y shape: ", val_y.shape)
+        # print("Test x shape: ", test_X.shape)
+        # print("Test y shape: ", test_y.shape)
 
         self.train = TimeSeriesDataset(train_X, train_y, [])
         self.validate = TimeSeriesDataset(val_X, val_y, [])
@@ -400,6 +397,7 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
     # create pairs of subjects x hypovolemia stages
     # pick 20% and use them as validaiton
     # this one picks one hypovolemia stage directly - since there are 5 training pigs, it corresponds to 20% directly
+    random.seed(42)
 
     pairs = [(x, y) for x in subject_indices for y in hypovolemia_stages]
     # Create separate lists for each element of
@@ -416,18 +414,20 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
 
     # Flatten the remaining pairs for training set
     train_pairs = [pair for sublist in hypo_stage_pairs.values() for pair in sublist]
-    print("Train pairs:", train_pairs)
-    print("Validation pairs:", val_pairs)
+    # print("Train pairs:", train_pairs)
+    # print("Validation pairs:", val_pairs)
 
     return train_pairs, val_pairs
 
-def get_filename_with_min_val_loss(directory, model_string):
+def get_filename_with_min_val_loss(directory, model_string, direction):
     import re
     # Define the pattern to match filenames
-    pattern = r'model-epoch=(\d+)-val_loss=([\d.]+)'
+    if direction != '':
+        direction = '_' + direction
+    pattern = r'model'+ direction +r'-epoch=(\d+)-val_loss=([\d.]+)'
     # pattern = r'model-\d{4}-\d{4}-epoch=(\d+)-val_loss=([\d.]+)' # for future use
     if model_string != '':
-        pattern = rf'model-{model_string}-epoch=(\d+)-val_loss=([\d.]+)'
+        pattern = rf'model{direction}-{model_string}-epoch=(\d+)-val_loss=([\d.]+)'
 
     min_val_loss = float('inf')
     best_model_filename = None
@@ -482,8 +482,7 @@ def objective():
         raise ValueError("Unknown environment")
 
     mode = 'test'   # train or test
-    bvds_model_str = '0725-0240' # string representing autoregressor model ran with specific architecture. for example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
-    autoreg_model_str = '' # string representing bvds model ran with specific architecture.
+    bvds_model_str = '0907-2312' # string representing bvds DOWNSTREAM model ran with specific architecture.
 
     # train - trains the model and saves the best model in terms of validation loss
     # test - loads the model with the minimum loss inside Model directory
@@ -520,6 +519,8 @@ def objective():
     dropout = config.dropout
     epochs = config.epochs
     overlap = config.overlap
+    autoreg_model_str = config.autoreg_model_str # string representing autoregressor model ran with specific architecture. for example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
+    
 
     # N * T * F
         # N: batch size
@@ -532,6 +533,8 @@ def objective():
     if mode == 'train':
         #model run name timestamp for easy access
         model_run_str = time.strftime("%m%d-%H%M")
+        model_str_dict = {'bvds_model_str': model_run_str}
+        wandb.log(model_str_dict)
         for test_pig_num in test_pig_nums:
             print(f"Training for Pig {test_pig_num} Started")
             # where you save your model
@@ -556,129 +559,158 @@ def objective():
 
             autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str)
-            autoreg_model = RNNAutoregressor.load_from_checkpoint(checkpoint_path)
+            checkpoint_path_f = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
+            checkpoint_path_b = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'b') #get best backward autoreg model
+            autoreg_model_f = RNNAutoregressor.load_from_checkpoint(checkpoint_path_f)
+            autoreg_model_b = RNNAutoregressor.load_from_checkpoint(checkpoint_path_b)
+            autoreg_model_f.eval()
+            autoreg_model_b.eval()
 
-            autoreg_model.eval()
             trainer = L.Trainer()
 
             #create separate data modules for train/test/val pigs for lstm encoder
             data_module.set_prediction_mode('train')
-            encoded_predictions_train = trainer.predict(autoreg_model, data_module)
-            encoded_predictions_train = torch.cat(encoded_predictions_train, dim=0).numpy()
+            encoded_predictions_train_f = trainer.predict(autoreg_model_f, data_module) #check seeding for train/val pairings!
+            encoded_predictions_train_f = torch.cat(encoded_predictions_train_f, dim=0).numpy()
+            encoded_predictions_train_b = trainer.predict(autoreg_model_b, data_module)
+            encoded_predictions_train_b = torch.cat(encoded_predictions_train_b, dim=0).numpy()
             bvds_labels_train = data_module.train.labels
+            encoded_predictions_train = np.concatenate((encoded_predictions_train_f, encoded_predictions_train_b), axis=2)
 
             data_module.set_prediction_mode('val')
-            encoded_predictions_val = trainer.predict(autoreg_model, data_module)
-            encoded_predictions_val = torch.cat(encoded_predictions_val, dim=0).numpy()
+            encoded_predictions_val_f = trainer.predict(autoreg_model_f, data_module)
+            encoded_predictions_val_f = torch.cat(encoded_predictions_val_f, dim=0).numpy()
+            encoded_predictions_val_b = trainer.predict(autoreg_model_b, data_module)
+            encoded_predictions_val_b = torch.cat(encoded_predictions_val_b, dim=0).numpy()
             bvds_labels_val = data_module.validate.labels
+            encoded_predictions_val = np.concatenate((encoded_predictions_val_f, encoded_predictions_val_b), axis=2)
 
             data_module.set_prediction_mode('test')
-            encoded_predictions_test = trainer.predict(autoreg_model, data_module)
-            encoded_predictions_test = torch.cat(encoded_predictions_test, dim=0).numpy()
+            encoded_predictions_test_f = trainer.predict(autoreg_model_f, data_module)
+            encoded_predictions_test_f = torch.cat(encoded_predictions_test_f, dim=0).numpy()
+            encoded_predictions_test_b = trainer.predict(autoreg_model_b, data_module)
+            encoded_predictions_test_b = torch.cat(encoded_predictions_test_b, dim=0).numpy()
+            encoded_predictions_test = np.concatenate((encoded_predictions_test_f, encoded_predictions_test_b), axis=2)
             bvds_labels_test = data_module.test.labels
             bvds_hypo_stages_test = data_module.test.hypo_stages
 
             encoded_data_module = DownstreamDataModule(encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
                                                         encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, training_mode, 
                                                         all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages, batch_size=batch_size)
-            
-            # encoded_data_module.setup()
 
-            model = BVDSRegressor(test_pig=test_pig_num, hidden_size=hidden_size, learning_rate=learning_rate, 
+
+            model = BVDSRegressor(test_pig=test_pig_num, hidden_size=autoreg_model_f.encoder.hidden_size, learning_rate=learning_rate, 
                                   weight_decay=weight_decay, l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE,
                                     max_epochs=epochs, hidden_layer=hidden_layer, num_layers=num_layers)
             trainer = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback], max_epochs=epochs)
 
             trainer.fit(model, encoded_data_module)
+        bvds_model_str = model_run_str
 
-    else:  # testing assuming that you have a trained model
-        results = {}
-        for test_pig_num in test_pig_nums:
-            model_output_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
-                                            folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            print(f"Testing for Pig {test_pig_num} Started")
-            checkpoint_path = get_filename_with_min_val_loss(model_output_dir, bvds_model_str)
-            print("Called model checkpoint path: ", checkpoint_path)
-                    
-            data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
-                                all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                                batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
+    ###########################################################################################
+    #Testing for bvds downstream (will run automatically if training)
+    ###########################################################################################
+    results = {}
+    for test_pig_num in test_pig_nums:
+        model_output_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
+                                        folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
+        
+        print("######################################################################")
+        print(f"Testing for Pig {test_pig_num} Started")
+        print("######################################################################")
 
-            checkpoint_callback = ModelCheckpoint(
-                dirpath=model_output_dir,
-                filename='model-{epoch:02d}-{val_loss:.2f}',
-                monitor='val_loss',   # we want to save the model based on validation loss
-                mode='min',   # we want to minimize validation loss
-                save_top_k=1
-            )
+        data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+                            all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                            batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
 
-            wandb_logger = WandbLogger(log_model=True)
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=model_output_dir,
+            filename='model-{epoch:02d}-{val_loss:.2f}',
+            monitor='val_loss',   # we want to save the model based on validation loss
+            mode='min',   # we want to minimize validation loss
+            save_top_k=1
+        )
 
-            autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
-                                            folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str)
-            autoreg_model = RNNAutoregressor.load_from_checkpoint(checkpoint_path)
+        wandb_logger = WandbLogger(log_model=True)
 
-            autoreg_model.eval()
-            trainer = L.Trainer()
+        autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
+                                        folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
+        checkpoint_path_f = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
+        checkpoint_path_b = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'b') #get best backward autoreg model
+        autoreg_model_f = RNNAutoregressor.load_from_checkpoint(checkpoint_path_f)
+        autoreg_model_b = RNNAutoregressor.load_from_checkpoint(checkpoint_path_b)
+        autoreg_model_f.eval()
+        autoreg_model_b.eval()
 
-            #create separate data modules for train/test/val pigs for lstm encoder
-            data_module.set_prediction_mode('train')
-            encoded_predictions_train = trainer.predict(autoreg_model, data_module)
-            encoded_predictions_train = torch.cat(encoded_predictions_train, dim=0).numpy()
-            bvds_labels_train = data_module.train.labels
+        trainer = L.Trainer()
+        
+        #create separate data modules for train/test/val pigs for lstm encoder
+        data_module.set_prediction_mode('train')
+        encoded_predictions_train_f = trainer.predict(autoreg_model_f, data_module) #check seeding for train/val pairings!
+        encoded_predictions_train_f = torch.cat(encoded_predictions_train_f, dim=0).numpy()
+        encoded_predictions_train_b = trainer.predict(autoreg_model_b, data_module)
+        encoded_predictions_train_b = torch.cat(encoded_predictions_train_b, dim=0).numpy()
+        bvds_labels_train = data_module.train.labels
+        encoded_predictions_train = np.concatenate((encoded_predictions_train_f, encoded_predictions_train_b), axis=2)
 
-            data_module.set_prediction_mode('val')
-            encoded_predictions_val = trainer.predict(autoreg_model, data_module)
-            encoded_predictions_val = torch.cat(encoded_predictions_val, dim=0).numpy()
-            bvds_labels_val = data_module.validate.labels
+        data_module.set_prediction_mode('val')
+        encoded_predictions_val_f = trainer.predict(autoreg_model_f, data_module)
+        encoded_predictions_val_f = torch.cat(encoded_predictions_val_f, dim=0).numpy()
+        encoded_predictions_val_b = trainer.predict(autoreg_model_b, data_module)
+        encoded_predictions_val_b = torch.cat(encoded_predictions_val_b, dim=0).numpy()
+        bvds_labels_val = data_module.validate.labels
+        encoded_predictions_val = np.concatenate((encoded_predictions_val_f, encoded_predictions_val_b), axis=2)
 
-            data_module.set_prediction_mode('test')
-            encoded_predictions_test = trainer.predict(autoreg_model, data_module)
-            encoded_predictions_test = torch.cat(encoded_predictions_test, dim=0).numpy()
-            bvds_labels_test = data_module.test.labels
-            bvds_hypo_stages_test = data_module.test.hypo_stages
+        data_module.set_prediction_mode('test')
+        encoded_predictions_test_f = trainer.predict(autoreg_model_f, data_module)
+        encoded_predictions_test_f = torch.cat(encoded_predictions_test_f, dim=0).numpy()
+        encoded_predictions_test_b = trainer.predict(autoreg_model_b, data_module)
+        encoded_predictions_test_b = torch.cat(encoded_predictions_test_b, dim=0).numpy()
+        encoded_predictions_test = np.concatenate((encoded_predictions_test_f, encoded_predictions_test_b), axis=2)
+        bvds_labels_test = data_module.test.labels
+        bvds_hypo_stages_test = data_module.test.hypo_stages
 
-            encoded_data_module = DownstreamDataModule(encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
-                                                        encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, training_mode, 
-                                                        all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages, batch_size=batch_size)
-            
-            # encoded_data_module.setup()
+        encoded_data_module = DownstreamDataModule(encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
+                                                    encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, training_mode, 
+                                                    all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages, batch_size=batch_size)
+        
+        # encoded_data_module.setup()
 
-            bvds_model_dir = os.path.join(project_dir, 'Models', 'DownstreamModel',
-                                            folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path = get_filename_with_min_val_loss(bvds_model_dir, bvds_model_str)
-            model = BVDSRegressor.load_from_checkpoint(checkpoint_path)
-            model.eval()
-            trainer = L.Trainer()
+        bvds_model_dir = os.path.join(project_dir, 'Models', 'DownstreamModel',
+                                        folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
+        checkpoint_path = get_filename_with_min_val_loss(bvds_model_dir, bvds_model_str, '')
+        model = BVDSRegressor.load_from_checkpoint(checkpoint_path)
+        model.eval()
+        trainer = L.Trainer()
 
-            predictions = trainer.predict(model, encoded_data_module)
-            predictions = torch.cat(predictions, dim=0).numpy()
+        predictions = trainer.predict(model, encoded_data_module)
+        predictions = torch.cat(predictions, dim=0).numpy()
 
-            gt_data = data_module.test.labels
-            if training_mode == 'classification':
-                # first convert class labels to correct values
-                gt_data = np.vectorize(classes_to_bvds_dict.get)(np.squeeze(gt_data))
-                predictions = np.vectorize(classes_to_bvds_dict.get)(np.squeeze(predictions))
-            predictions = np.squeeze(predictions)
-            gt_data = np.squeeze(gt_data)
-            # we do not want to return predictions that are out of bounds
-            predictions[predictions > 100] = 100
-            predictions[predictions < 0] = 0
+        gt_data = data_module.test.labels
+        if training_mode == 'classification':
+            # first convert class labels to correct values
+            gt_data = np.vectorize(classes_to_bvds_dict.get)(np.squeeze(gt_data))
+            predictions = np.vectorize(classes_to_bvds_dict.get)(np.squeeze(predictions))
+        predictions = np.squeeze(predictions)
+        gt_data = np.squeeze(gt_data)
+        # we do not want to return predictions that are out of bounds
+        predictions[predictions > 100] = 100
+        predictions[predictions < 0] = 0
 
-            print(f"Pig {test_pig_num} results")
-            report_results(gt_data, predictions, data_module.test_hypo_stages, results, test_pig_num)
-            print()
+        print(f"Pig {test_pig_num} results")
+        report_results(gt_data, predictions, data_module.test_hypo_stages, results, test_pig_num)
+        print()
 
-        # now all median loss
-        print("Global Results")
-        for stage in test_hypovolemia_stages + ['overall']:
-            print("Stage: ", stage)
-            all_pig_results = []
-            for pig_num in test_pig_nums:
-                all_pig_results.append(results[pig_num][stage])
-            print(f"Median RMSE error of {stage}: ", np.median(all_pig_results))
+    # now all median loss
+    print("Global Results")
+    for stage in test_hypovolemia_stages + ['overall']:
+        print("Stage: ", stage)
+        all_pig_results = []
+        for pig_num in test_pig_nums:
+            all_pig_results.append(results[pig_num][stage])
+        print(f"Median RMSE error of {stage}: ", np.median(all_pig_results))
+        result_dict = {stage+'_test': np.median(all_pig_results)}
+        wandb.log(result_dict)
 
     wandb.finish()
 
@@ -688,16 +720,17 @@ if __name__ == "__main__":
         "method": "random",
         "metric": {"goal": "minimize", "name": "val_loss"},
         "parameters": {
-            "learning_rate": {"values": [0.0007, 0.001]},
-            "weight_decay": {"values": [0, .0005]},
+            "learning_rate": {"values": [0.001]},
+            "weight_decay": {"values": [0.0005]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [128]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
+            "hidden_size": {"values": [256]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
             "forecast_size": {"values": [10]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
-            "hidden_layer": {"values": [0, 64]},
-            "num_layers": {"values": [1, 2]},
-            "dropout": {"values": [.1, 0]},
+            "hidden_layer": {"values": [64]},
+            "num_layers": {"values": [2]},
+            "dropout": {"values": [0]},
+            "autoreg_model_str": {"values": ['0728-0329', '0728-0752', '0728-0920', '0729-1024', '0729-1224']}
         },
     }
     perform_sweep = False #change to True if want to run sweep of parameters
@@ -707,19 +740,20 @@ if __name__ == "__main__":
 
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=10)
+        wandb.agent(sweep_id, function=objective, count=5)
     else:
         wandb.init(project=wandbproject, config={
             "learning_rate": 0.001,
             "weight_decay": 0.0005,
             "l1_lambda": 0.00,
-            "hidden_size": 128,
+            "hidden_size": 256, #set to the same dimension as autoregressor!
             "forecast_size": 10,
             "overlap": 0.9,
             "epochs": 40,
             "hidden_layer": 64,
             "num_layers": 2,
             "dropout": 0,
+            "autoreg_model_str": '0729-1024',
         }, save_code=True)
         objective()
 
