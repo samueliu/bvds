@@ -135,7 +135,7 @@ class RNNAutoregressor(L.LightningModule):
         if batch_idx == 0 and self.current_epoch > self.epochs - 2:
             frame_index = random.randint(0, x.size(0) - 1)
             features = [0, 1, 8, 9]
-            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'train', self.direction)
+            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'train', self.direction, self.forecast_size)
         
         return loss
 
@@ -151,7 +151,7 @@ class RNNAutoregressor(L.LightningModule):
             frame_index = random.randint(0, x.size(0) - 1) #is seeding needed here or something?
             features = [0, 1, 8, 10]
             self.running_loss.append(loss)
-            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'val', self.direction)
+            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'val', self.direction, self.forecast_size)
             if self.test_pig == 6:
                 self.log(f'mean_val_loss', sum(self.running_loss)/len(self.running_loss), prog_bar=False, on_step=False, on_epoch=True)
 
@@ -477,7 +477,7 @@ def get_filename_with_min_val_loss(directory):
         print("No model files found in the directory.")
     return best_model_path
 
-def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, direction):
+def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, direction, forecast_size):
     if len(features) > 4:
         features = features[0:3] #only plots max 4 features
 
@@ -489,14 +489,19 @@ def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, dir
         actual = y[frame_index, :, feature_index].cpu().detach().numpy()
         window = x[frame_index, :, feature_index].cpu().detach().numpy()
 
-        if direction == 0:
-            full_window = np.concatenate((actual, window))
-            cast = np.pad(reconstruct, (0, len(full_window) - len(actual)), 'constant', constant_values=np.nan)
-            axs[i].plot(cast, label='Predicted Backcast', color='red', linestyle='dashed')
+        if forecast_size == 0:
+            full_window = actual
+            cast = reconstruct
+            axs[i].plot(cast, label='Predicted Autoencoder', color='red', linestyle='dashed')
         else:
-            full_window = np.concatenate((window, actual))
-            cast = np.pad(reconstruct, (len(full_window) - len(actual), 0), 'constant', constant_values=np.nan)
-            axs[i].plot(cast, label='Predicted Forecast', color='red', linestyle='dashed')
+            if direction == 0:
+                full_window = np.concatenate((actual, window))
+                cast = np.pad(reconstruct, (0, len(full_window) - len(actual)), 'constant', constant_values=np.nan)
+                axs[i].plot(cast, label='Predicted Backcast', color='red', linestyle='dashed')
+            else:
+                full_window = np.concatenate((window, actual))
+                cast = np.pad(reconstruct, (len(full_window) - len(actual), 0), 'constant', constant_values=np.nan)
+                axs[i].plot(cast, label='Predicted Forecast', color='red', linestyle='dashed')
 
         axs[i].plot(full_window, label='Actual', color='blue')
         axs[i].set_title(f'Sample Predicted vs Actual for Epoch {epoch}, Feature: {feature_index}')
@@ -589,20 +594,21 @@ def objective():
             if not os.path.exists(model_output_dir):
                 os.makedirs(model_output_dir)
                 
-            data_module_backward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
-                         all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                         batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=0)
-            model_backward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, window_size=window_size, forecast_size=forecast_size, output_size=len(feature_names),
-                                      hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
-                                      dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=0)
-            checkpoint_callback_backward = ModelCheckpoint(
-                dirpath=model_output_dir,
-                filename='model_b-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
-                monitor='val_loss',   # we want to save the model based on validation loss
-                mode='min',   # we want to minimize validation loss
-                save_top_k=1
-            )
-            #data_module_backward.setup() #run if not using trainer
+            if forecast_size > 0: #creates forwards/backwards autoregressor if not autoencoder
+                data_module_backward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+                            all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                            batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=0)
+                model_backward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, window_size=window_size, forecast_size=forecast_size, output_size=len(feature_names),
+                                        hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
+                                        dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=0)
+                checkpoint_callback_backward = ModelCheckpoint(
+                    dirpath=model_output_dir,
+                    filename='model_b-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
+                    monitor='val_loss',   # we want to save the model based on validation loss
+                    mode='min',   # we want to minimize validation loss
+                    save_top_k=1
+                )
+                #data_module_backward.setup() #run if not using trainer
 
             data_module_forward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
                          all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
@@ -620,8 +626,9 @@ def objective():
 
             wandb_logger = WandbLogger(log_model=True)
             #two trainers, one for backwards, one for forwards
-            trainer_backwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_backward], max_epochs=epochs)
-            trainer_backwards.fit(model_backward, data_module_backward)
+            if forecast_size > 0:
+                trainer_backwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_backward], max_epochs=epochs)
+                trainer_backwards.fit(model_backward, data_module_backward)
 
             trainer_forwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_forward], max_epochs=epochs)
             trainer_forwards.fit(model_forward, data_module_forward)
@@ -683,7 +690,7 @@ if __name__ == "__main__":
             "weight_decay": {"values": [0.00001, .0007]},
             "l1_lambda": {"values": [0]},
             "hidden_size": {"values": [128, 256]},
-            "forecast_size": {"values": [10, 15]},
+            "forecast_size": {"values": [0]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
             "hidden_layer": {"values": [128, 64]},
@@ -692,7 +699,7 @@ if __name__ == "__main__":
             "window_size": {"values": [30, 60]},
         },
     }
-    perform_sweep = True #change to True if want to run sweep of parameters
+    perform_sweep = False #change to True if want to run sweep of parameters
     wandbproject = "RNNAutoregressor"
 
     if perform_sweep:
@@ -704,7 +711,7 @@ if __name__ == "__main__":
             "weight_decay": 0.0007,
             "l1_lambda": 0.00000,
             "hidden_size": 128,
-            "forecast_size": 20, #set forecast size to 0 for Autoencoder mode
+            "forecast_size": 0, #set forecast size to 0 for Autoencoder mode
             "overlap": 0.9,
             "epochs": 10,
             "hidden_layer": 48, #keep at zero unless multiple fc layers in decoder wanted
