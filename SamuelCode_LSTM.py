@@ -699,7 +699,7 @@ if __name__ == "__main__":
             "window_size": {"values": [30, 60]},
         },
     }
-    perform_sweep = False #change to True if want to run sweep of parameters
+    perform_sweep = True #change to True if want to run sweep of parameters
     wandbproject = "RNNAutoregressor"
 
     if perform_sweep:
