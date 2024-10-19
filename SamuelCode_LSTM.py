@@ -17,9 +17,8 @@ import socket
 from pytorch_lightning.loggers import WandbLogger
 
 # Set random seed for reproducibility
-random_seed = 42
+random_seed = 42 # Also remember to change in get_train_val_pairs !!!
 random.seed(random_seed)
-np.random.seed(random_seed)
 torch.manual_seed(random_seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(random_seed)
@@ -63,6 +62,7 @@ class MyProgressBar(L.pytorch.callbacks.TQDMProgressBar):
         return bar
 
 class TimeSeriesDataset(Dataset):
+    # Creates timeseries dataset from designated x and y data
     def __init__(self, features, labels, hypo_stages):
         self.features = features
         self.labels = labels
@@ -72,13 +72,16 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, idx): #add arg for forwards/backwards?
         return torch.from_numpy(self.features[idx]).type(torch.FloatTensor), \
                torch.from_numpy(self.labels[idx]).type(torch.FloatTensor)
-
+        # Commented out: for cuda-enabled devices
         # return torch.from_numpy(self.features[idx]).type(torch.FloatTensor).cuda(), \
         #        torch.from_numpy(self.labels[idx]).type(torch.FloatTensor).cuda()
     
+
 class RNNAutoregressor(L.LightningModule):
-    def __init__(self, test_pig, in_channels, hidden_size, window_size, forecast_size, output_size, hidden_layer, num_layers,
-                  learning_rate, weight_decay, l1_lambda, dropout, device_to_use, max_epochs, running_loss, direction, **kwargs):
+    # Defines LSTM-based Autoregressor/Autoencoder
+    def __init__(self, test_pig, in_channels, hidden_size, window_size, forecast_size, output_size, 
+                 hidden_layer, num_layers, learning_rate, weight_decay, l1_lambda, dropout, 
+                 device_to_use, max_epochs, running_loss, direction, **kwargs):
         super().__init__()
         self.save_hyperparameters()
         self.test_pig = test_pig
@@ -93,89 +96,106 @@ class RNNAutoregressor(L.LightningModule):
         self.num_layers = num_layers
         self.running_loss = running_loss
         self.direction = direction
+        self.loss_fn = nn.MSELoss()
 
+        # Separate classes for Encoder, Decoder for 
+        # easier freezing of LSTM encoding in downstream task
         self.encoder = Encoder(in_channels, hidden_size, num_layers)
         self.decoder = Decoder(hidden_size, output_size, hidden_layer, dropout, num_layers)
 
-        self.loss_fn = nn.MSELoss()
-
     def forward(self, x):
-        # encode the input sequence
+        # Encode the input sequence; used in training and upstream task
         encoded_out, (hn, cn) = self.encoder(x)
         if self.forecast_size == 0:
             repeated_out = encoded_out[:, -1, :].unsqueeze(1).repeat(1, self.window_size, 1) 
         else:
             repeated_out = encoded_out[:, -1, :].unsqueeze(1).repeat(1, self.forecast_size, 1) 
-
-        # decode repeated output
+        # Decode repeated output
         reconstructed_out, _ = self.decoder(repeated_out)
         
         return reconstructed_out
     
-    #only encodes; this is used for bvds downstream task
     def encode(self, x):
+        # Function that only encodes; this is used for BVDS downstream task!
         encoder_out, _ = self.encoder(x)
         encoded_out = encoder_out[:, -1, :].unsqueeze(1)
-
         return encoded_out
 
     def training_step(self, batch, batch_idx):
+        # What happens during the training cycle
         x, y = batch
         x, y = x.to(self.device_to_use), y.to(self.device_to_use)
         x_hat = self(x) #runs through fc layers, results in x_hat=(N,2,M,F)
 
+        # Compare actual feature timeseries with output from LSTM
         loss = self.loss_fn(x_hat, y)
 
+        # IF USING L1 (is a hyperparameter, usually set to 0)
         l1_loss = sum(torch.sum(torch.abs(param)) for param in self.parameters())
         loss += self.l1_lambda * l1_loss
 
+        # Logging in wandb to plot training loss for each pig
         self.log(f'train_loss_pig_{self.test_pig}_{self.direction}', loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('train_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
 
+        # Plotting final training epoch to show predicted vs actual feature timeseries
         if batch_idx == 0 and self.current_epoch > self.epochs - 2:
             frame_index = random.randint(0, x.size(0) - 1)
             features = [0, 1, 8, 9]
-            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'train', self.direction, self.forecast_size)
+            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'train',
+                           self.direction, self.forecast_size)
         
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch # x=(N,T,F) y=(N,2,M,F)
+        # What happens during validation
+        x, y = batch # x=(N,T,F) y=(N,2,M,F) if autoreg, (N,M,F) if autoencoder
         x, y = x.to(self.device), y.to(self.device)
-        x_hat = self(x) #runs through fc layers
+        x_hat = self(x) # runs through fc layers
         loss = self.loss_fn(x_hat, y) 
+        # Logging in wandb to plot validation loss for each pig
         self.log(f'val_loss_pig_{self.test_pig}_{self.direction}', loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('val_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
 
+        # Plotting final validation epoch to show predicted vs actual feature timeseries
         if batch_idx == 0 and self.current_epoch > self.epochs - 2:
             frame_index = random.randint(0, x.size(0) - 1) #is seeding needed here or something?
             features = [0, 1, 8, 10]
             self.running_loss.append(loss)
-            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'val', self.direction, self.forecast_size)
+            plot_features(x, y, x_hat, frame_index, features, self.current_epoch, self.test_pig, 'val',
+                           self.direction, self.forecast_size)
             if self.test_pig == 6:
-                self.log(f'mean_val_loss', sum(self.running_loss)/len(self.running_loss), prog_bar=False, on_step=False, on_epoch=True)
+                # Important for selecting best model: Log mean validation loss of all 6 pigs for a model
+                self.log(f'mean_val_loss', sum(self.running_loss)/len(self.running_loss), 
+                         prog_bar=False, on_step=False, on_epoch=True)
 
         return loss
 
-    # # Prediction step for reconstruction (commented out)
+
     # def predict_step(self, batch, batch_idx):
+    # # Prediction step for reconstruction (commented out)
     #     x, y = batch
     #     x = x.to(self.device_to_use)
     #     x_hat = self(x)
     #     return x_hat
 
-    # Prediction step for BVDS downstream (encoder only)
     def predict_step(self, batch, batch_idx):
+        # Prediction step for BVDS downstream (encoder only)
+        # Only runs through encoder and outputs hidden layer,
+        # which can be used in downstrean feature regressor
         x, _ = batch
         x = x.to(self.device_to_use)
         encoded_out = self.encode(x)
         return encoded_out
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay) #adjust learning rate here
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         return optimizer
     
 class Encoder(nn.Module):
+    # Encoding portion of Autoreg model:
+    # Feed feature timeseries windows into n layers of LSTM 
+
     def __init__(self, in_channels, hidden_size, num_layers):
         super(Encoder, self).__init__()
         self.lstm1 = nn.LSTM(input_size=in_channels, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
@@ -190,8 +210,11 @@ class Encoder(nn.Module):
         return out1, (hn1, cn1)
         
 class Decoder(nn.Module):
+    # Take hidden layer from LSTM and reconstruct features in timeseries
+
     def __init__(self, hidden_size, output_size, hidden_layer, dropout, num_layers):
         super(Decoder, self).__init__()
+        # Hyperparameters can change LSTM dimensions, but will not affect downstream task
         self.lstm1 = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
         if hidden_layer == 0:
             self.fc = nn.Sequential(
@@ -218,14 +241,18 @@ class Decoder(nn.Module):
         return out, (hn1, cn1)
     
 class MyDataModule(L.LightningDataModule):
+    # DataLoader for each pig's feature timeseries and reconstruction windows,
+    # which are either a forecast/backcast or an autoencoding of the same window
+
     def __init__(self, data_directory, num_pigs, test_pig_num, bvds_mode,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15, direction=0): #direction 0=backwards, 1=forwards
+                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15, direction=0): 
         super().__init__()
         # train/test_hypovolemia_stages = ['Absolute', 'Relative', 'Resuscitation']
         # these are here in case you want to train/test your model using certain stages
         self.data_directory = data_directory
-        self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   # bvds_mode = 'classification' or 'regression' unchanged from original
+        # bvds_mode = 'classification' or 'regression' unchanged from original
+        self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   
         self.label_name = 'Class' if bvds_mode=='classification' else 'BVDS' #kept this logic for future implementation for downstream task
         self.num_pigs = num_pigs
         self.test_pig_num = test_pig_num
@@ -252,16 +279,20 @@ class MyDataModule(L.LightningDataModule):
             for hypovolemia_stage in self.all_hypovolemia_stages:
                 self.data_dict[pig_idx][hypovolemia_stage] = {}
                 data_path = os.path.join(self.data_directory, hypovolemia_stage)
+                # x: "features"
+                # y: "labels"
+                # Both features and labels are derived from timeseries for reconstruction
                 features = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
                 # # Removed BVDS labels, since focus is on feature forecasting but kept for later implementation in downstream task
                 # labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_{self.bvds_mode}.csv"))[self.label_name].values 
                 labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
                 self.data_dict[pig_idx][hypovolemia_stage]['features'] = features
                 self.data_dict[pig_idx][hypovolemia_stage]['labels'] = labels
-        # now split
+        # now split into training, validation, and testing sets by pig/stage
         self.prepare_train_val_test()
 
     def set_prediction_mode(self, mode):
+        # Can set into different modes that only predict, or train, etc.
         self.prediction_mode = mode
 
     def prepare_train_val_test(self):
@@ -269,18 +300,20 @@ class MyDataModule(L.LightningDataModule):
         pigs_for_training = [m+1 for m in range(self.num_pigs) if m+1 != self.test_pig_num]
         print("pigs for training: ", pigs_for_training)
         print("pig for testing: ", self.test_pig_num)
+
+        # Preparing training set
         train_X = np.empty((0, self.window_size, len(feature_names)))
         val_X = np.empty((0, self.window_size, len(feature_names)))
-        if self.forecast_size == 0:
+        if self.forecast_size == 0: # For autoencoding, predicting the same window
             train_y = np.empty((0, self.window_size, len(feature_names)))
             val_y = np.empty((0, self.window_size, len(feature_names)))
-        else:
+        else: # For forecast/backcast autoregressor
             train_y = np.empty((0, self.forecast_size, len(feature_names)))
             val_y = np.empty((0, self.forecast_size, len(feature_names)))
-
+        #Find which pigs/bvds stages are for training and create dataset with these features
         train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
 
-        # training
+        # Create separate dataset for the training data
         for pair in train_pairs:
             (pig_idx, hypovolemia_stage) = pair
             features = self.data_dict[pig_idx][hypovolemia_stage]['features']
@@ -288,14 +321,15 @@ class MyDataModule(L.LightningDataModule):
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, direction=self.direction)
+                                                                           forecast_size=self.forecast_size, 
+                                                                           direction=self.direction)
             train_X = np.vstack((train_X, ts_features))
             if self.forecast_size == 0:
                 train_y = np.vstack((train_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
             else:
                 train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
-        # validation
+        # Create separate dataset for the validation data
         for pair in val_pairs:
             (pig_idx, hypovolemia_stage) = pair
             features = self.data_dict[pig_idx][hypovolemia_stage]['features']
@@ -303,14 +337,16 @@ class MyDataModule(L.LightningDataModule):
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, direction=self.direction)
+                                                                           forecast_size=self.forecast_size, 
+                                                                           direction=self.direction)
             val_X = np.vstack((val_X, ts_features))
             if self.forecast_size == 0:
                 val_y = np.vstack((val_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
             else:
                 val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
-        # for the test pig
+
+        # For the test pig, create another dataset:
         test_X = np.empty((0, self.window_size, len(feature_names)))
         if self.forecast_size == 0:
             test_y = np.empty((0, self.window_size, len(feature_names)))
@@ -324,7 +360,8 @@ class MyDataModule(L.LightningDataModule):
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, direction=self.direction)
+                                                                           forecast_size=self.forecast_size, 
+                                                                           direction=self.direction)
             self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
 
             test_X = np.vstack((test_X, ts_features))
@@ -333,16 +370,18 @@ class MyDataModule(L.LightningDataModule):
             else:
                 test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
+
         print("Train x shape: ", train_X.shape)
         print("Val x shape: ", val_X.shape)
         print("Test x shape: ", test_X.shape)
         print("Test hypo stages length: ", self.test_hypo_stages.shape)
 
-        mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
+        # Changed to calculate mean, std from overall window (including forecast/backcast)
+        # for consistent normalization
+        mean, std = get_timeseries_standardizer(train_X) 
         train_X_std = (train_X - mean) / std
         val_X_std = (val_X - mean) / std
         test_X_std = (test_X - mean) / std
-
         train_Y_std = (train_y - mean) / std
         val_Y_std = (val_y - mean) / std
         test_Y_std = (test_y - mean) / std   
@@ -421,7 +460,7 @@ def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_perc
 def get_timeseries_standardizer(data):
     # Standardize time series data
     # inputs: numpy array with shape NumSamples x SequenceLength x Features
-    # outputs: standardized_data: numpy array with the same shape as data, but standardized along the Features axis
+    # outputs: standardized_data: np array with the same shape as data, standardized along the Features axis
     # Compute mean and standard deviation across NumSamples and SequenceLength axes
     mean = np.mean(data, axis=(0, 1), keepdims=True)
     std = np.std(data, axis=(0, 1), keepdims=True)
@@ -437,7 +476,8 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
     # each key is a hypovolemia stage, each value is a list of tuples (pig_idx, hypovolemia stage)
     for pair in pairs:
         hypo_stage_pairs[pair[1]].append(pair)
-    # Shuffle each list
+    # Shuffle each list. Reseed random sequence so it is repeatable in downstream.
+    random.seed(random_seed)
     for key in hypo_stage_pairs:
         random.shuffle(hypo_stage_pairs[key])
 
@@ -478,8 +518,11 @@ def get_filename_with_min_val_loss(directory):
     return best_model_path
 
 def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, direction, forecast_size):
+    # Plots features of a random sample window. 
+    # Includes predicted LSTM feature layed over actual features.
+    # Only shows 4 features max; edit which features using parameter.
     if len(features) > 4:
-        features = features[0:3] #only plots max 4 features
+        features = features[0:3]
 
     fig, axs = plt.subplots(len(features), 1, figsize=(12, 5 * len(features)))
 
@@ -489,16 +532,16 @@ def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, dir
         actual = y[frame_index, :, feature_index].cpu().detach().numpy()
         window = x[frame_index, :, feature_index].cpu().detach().numpy()
 
-        if forecast_size == 0:
+        if forecast_size == 0: #If autoencoder, simply plot prediction over existing timeseries window
             full_window = actual
             cast = reconstruct
             axs[i].plot(cast, label='Predicted Autoencoder', color='red', linestyle='dashed')
         else:
-            if direction == 0:
+            if direction == 0: #If backcast
                 full_window = np.concatenate((actual, window))
                 cast = np.pad(reconstruct, (0, len(full_window) - len(actual)), 'constant', constant_values=np.nan)
                 axs[i].plot(cast, label='Predicted Backcast', color='red', linestyle='dashed')
-            else:
+            else: #If forecast
                 full_window = np.concatenate((window, actual))
                 cast = np.pad(reconstruct, (len(full_window) - len(actual), 0), 'constant', constant_values=np.nan)
                 axs[i].plot(cast, label='Predicted Forecast', color='red', linestyle='dashed')
@@ -521,6 +564,12 @@ def plot_features(x, y, x_hat, frame_index, features, epoch, test_pig, mode, dir
     # Log the plot to wandb
     wandb.log({f"plots//{mode}_pig{test_pig}_{direction}_{epoch}_{timestr}": wandb.Image(plt_path)})
 
+
+#############################################################################################################
+#############################################################################################################
+#################################### MAIN CODE below ########################################################
+#############################################################################################################
+
 def objective():
 
     if not wandb.run:
@@ -528,7 +577,9 @@ def objective():
     wandb.init(settings=wandb.Settings(code_dir="."))
     config = wandb.config
 
+    # Check if running locally or on server
     hostname = socket.gethostname()
+    # Find data directory based on host machine (hardcoded to Samuel Liu's environments)
     if hostname == 'samue':
         project_dir = r"C:\\Users\\samue\\OneDrive - Georgia Institute of Technology\\GT Files\\ECE 8903 I02\\SamuelCode\\HypovolemiaSamuel"
         data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\Samuel Liu\\HypovolemiaSamuel\\Data"
@@ -561,8 +612,8 @@ def objective():
     num_pigs = 6
     window_size = config.window_size
     batch_size = 128
-    test_pig_nums = [1, 2, 3, 4, 5, 6]   # for each pig we will a create a different model by excluding that pig
-    # some parameters we might play with
+    test_pig_nums = [1, 2, 3, 4, 5, 6] # for each pig we create a different model by excluding that pig
+    # some parameters we might play with; Edit in hyperparameter section
     hidden_size = config.hidden_size
     hidden_layer = config.hidden_layer
     num_layers = config.num_layers
@@ -582,6 +633,9 @@ def objective():
         # 2 is for future/past prediction
         # M: length of forecast/
 
+##########################################################################################################
+################# Section is for TRAINING a new model ####################################################
+
     if mode == 'train':
         running_loss = []
         #model run name timestamp for easy access
@@ -594,13 +648,30 @@ def objective():
             if not os.path.exists(model_output_dir):
                 os.makedirs(model_output_dir)
                 
-            if forecast_size > 0: #creates forwards/backwards autoregressor if not autoencoder
-                data_module_backward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
-                            all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                            batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=0)
-                model_backward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, window_size=window_size, forecast_size=forecast_size, output_size=len(feature_names),
-                                        hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
-                                        dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=0)
+            if forecast_size > 0: # Creates backwards autoregressor if not autoencoder
+
+                # Creates DataLoader w/ timeseries backcast
+                data_module_backward = MyDataModule(
+                    data_dir, num_pigs, test_pig_num, training_mode,
+                    all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                    batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, 
+                    forecast_size=forecast_size, 
+                    direction=0 # direction 0 = backwards
+                    )
+                
+                # Creates Backwards-Predicting Autoregressor model 
+                model_backward = RNNAutoregressor(
+                    test_pig=test_pig_num, in_channels=len(feature_names), 
+                    hidden_size=hidden_size, window_size=window_size, 
+                    forecast_size=forecast_size, output_size=len(feature_names),
+                    hidden_layer=hidden_layer, num_layers=num_layers,
+                    learning_rate=learning_rate, weight_decay=weight_decay, 
+                    l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE, 
+                    max_epochs=epochs, running_loss=running_loss, 
+                    direction=0 # direction 0 = backwards
+                    )
+                
+                # Checkpoint callback for Backwards Autoencoder
                 checkpoint_callback_backward = ModelCheckpoint(
                     dirpath=model_output_dir,
                     filename='model_b-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
@@ -608,14 +679,32 @@ def objective():
                     mode='min',   # we want to minimize validation loss
                     save_top_k=1
                 )
-                #data_module_backward.setup() #run if not using trainer
 
-            data_module_forward = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
-                         all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                         batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size, direction=1)
-            model_forward = RNNAutoregressor(test_pig=test_pig_num, in_channels=len(feature_names), hidden_size=hidden_size, window_size=window_size, forecast_size=forecast_size, output_size=len(feature_names),
-                                      hidden_layer=hidden_layer, num_layers=num_layers,learning_rate=learning_rate, weight_decay=weight_decay, l1_lambda=l1_lambda, 
-                                      dropout=dropout, device_to_use=DEVICE, max_epochs=epochs, running_loss=running_loss, direction=1)
+                #data_module_backward.setup() # Uncomment, run if not using trainer
+
+            # Creates DataLoader w/ timeseries forecast OR autoencoder if forecast=0
+            data_module_forward = MyDataModule(
+                data_dir, num_pigs, test_pig_num, training_mode,
+                all_hypovolemia_stages, train_hypovolemia_stages, 
+                test_hypovolemia_stages, batch_size=batch_size, 
+                overlap_percentage=overlap, window_size=window_size, 
+                forecast_size=forecast_size, 
+                direction=1 # direction 1 = forwards
+                )
+            
+            # Creates Forwards-Predicting Autoregressor Model OR Autoencoder if forecast=0
+            model_forward = RNNAutoregressor(
+                test_pig=test_pig_num, in_channels=len(feature_names), 
+                hidden_size=hidden_size, window_size=window_size, 
+                forecast_size=forecast_size, output_size=len(feature_names),
+                hidden_layer=hidden_layer, num_layers=num_layers,
+                learning_rate=learning_rate, weight_decay=weight_decay, 
+                l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE, 
+                max_epochs=epochs, running_loss=running_loss, 
+                direction=1 # direction 1 = forwards
+                ) 
+            
+            # Checkpoint callback for Forwards Autoregressor/Autoencoder
             checkpoint_callback_forward = ModelCheckpoint(
                 dirpath=model_output_dir,
                 filename='model_f-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
@@ -624,17 +713,29 @@ def objective():
                 save_top_k=1
             )
 
+            # Initialize wandb logger to view stats
             wandb_logger = WandbLogger(log_model=True)
-            #two trainers, one for backwards, one for forwards
+
+            # Two trainers, one for backwards, one for forwards. 
+            # Creating backwards trainer if not autoencoder
             if forecast_size > 0:
-                trainer_backwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_backward], max_epochs=epochs)
+                trainer_backwards = L.Trainer(
+                    logger=wandb_logger, callbacks=[MyProgressBar(), 
+                    checkpoint_callback_backward], max_epochs=epochs
+                    )
                 trainer_backwards.fit(model_backward, data_module_backward)
 
-            trainer_forwards = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback_forward], max_epochs=epochs)
+            # Creating trainer for forwards autoregressor or autoencoder
+            trainer_forwards = L.Trainer(
+                logger=wandb_logger, callbacks=[MyProgressBar(), 
+                checkpoint_callback_forward], max_epochs=epochs
+                )
             trainer_forwards.fit(model_forward, data_module_forward)
 
 
-    else:  # testing assuming that you have a trained model
+##########################################################################################################
+################# Section is for TESTING, assuming you have trained a model already ######################
+    else:
         results = {}
         for test_pig_num in test_pig_nums:
             model_output_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
@@ -679,9 +780,17 @@ def objective():
 
     wandb.finish()
 
+##########################################################################################################
+###################### Section is for SETTING HYPERPARAMETERS ############################################
     
 if __name__ == "__main__":
-    # Define the search space
+    
+    ###### Change to True to sweep of hyperparameters! #########
+    perform_sweep = True 
+    wandbproject = "RNNAutoregressor"
+    ###########################################################
+
+    # For Sweeps: Define the search space below
     sweep_configuration = {
         "method": "random",
         "metric": {"goal": "minimize", "name": "mean_val_loss"},
@@ -689,34 +798,36 @@ if __name__ == "__main__":
             "learning_rate": {"values": [0.0001]},
             "weight_decay": {"values": [0.00001, .0007]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [128, 256]},
-            "forecast_size": {"values": [0]},
+            "hidden_size": {"values": [128, 256]}, 
+            "forecast_size": {"values": [0]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
-            "hidden_layer": {"values": [128, 64]},
-            "num_layers": {"values": [1, 2]},
-            "dropout": {"values": [0]},
-            "window_size": {"values": [30, 60]},
+            "hidden_layer": {"values": [128, 64]}, # Keep at 0, unless you want multiple FC layers in DECODER
+            "num_layers": {"values": [1, 2]}, # Layers of LSTM 
+            "dropout": {"values": [0]}, # Dropout rate
+            "window_size": {"values": [30, 60]}, # Timeseries window to train on
         },
     }
-    perform_sweep = True #change to True if want to run sweep of parameters
-    wandbproject = "RNNAutoregressor"
 
+    # Initialize wandb for hyperparameter sweep
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
         wandb.agent(sweep_id, function=objective, count=16)
     else:
+
+        # For Non-sweeps, edit hyperparameters for single runs
         wandb.init(project=wandbproject, config={
             "learning_rate": 0.0001,
             "weight_decay": 0.0007,
             "l1_lambda": 0.00000,
             "hidden_size": 128,
-            "forecast_size": 0, #set forecast size to 0 for Autoencoder mode
-            "overlap": 0.9,
+            "forecast_size": 0, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
+            "overlap": 0.9, # Percentage overlap of timeseries training windows
             "epochs": 10,
-            "hidden_layer": 48, #keep at zero unless multiple fc layers in decoder wanted
-            "num_layers": 1,
-            "dropout": 0,
-            "window_size": 30
+            "hidden_layer": 48, # Keep at 0, unless you want multiple FC layers in DECODER
+            "num_layers": 1, # Layers of LSTM 
+            "dropout": 0, # Dropout rate
+            "window_size": 30 # Timeseries window to train on
         }, save_code=True)
+
         objective()

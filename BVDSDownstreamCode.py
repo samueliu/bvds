@@ -16,9 +16,13 @@ import time
 import socket
 from SamuelCode_LSTM import RNNAutoregressor
 from pytorch_lightning.loggers import WandbLogger
+# from SamuelCode_LSTM import random_seed
 
+########################### Run Code for Forecast/Backcast ONLY #############################################
 # Set random seed for reproducibility
-random_seed = 42
+# NOTE: Seed MUST be IDENTICAL to one used in upstream LSTM!
+# OR ELSE train/val/test sets may differ in downstream which will lead to incorrect training
+random_seed = 42 # Set seed manually. Or comment out+import from LSTM code (not recommended)
 random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
@@ -64,6 +68,7 @@ class MyProgressBar(L.pytorch.callbacks.TQDMProgressBar):
         return bar
 
 class TimeSeriesDataset(Dataset):
+    # Creates timeseries dataset from designated x and y data
     def __init__(self, features, labels, hypo_stages):
         self.features = features
         self.labels = labels
@@ -75,7 +80,9 @@ class TimeSeriesDataset(Dataset):
                torch.from_numpy(self.labels[idx]).type(torch.FloatTensor) #.cuda() on both return statements?
     
 class BVDSRegressor(L.LightningModule):
-    def __init__(self, test_pig, hidden_size, learning_rate, weight_decay, l1_lambda, dropout, device_to_use, max_epochs, hidden_layer, num_layers):
+    # Definition of downstream regressor model for predicting BVDS 
+    def __init__(self, test_pig, hidden_size, learning_rate, weight_decay, l1_lambda, dropout, 
+                 device_to_use, max_epochs, hidden_layer, num_layers):
         super().__init__()
         self.save_hyperparameters()
         self.test_pig = test_pig
@@ -87,8 +94,11 @@ class BVDSRegressor(L.LightningModule):
         self.hidden_layer = hidden_layer
         self.num_layers = num_layers
         
+        # Different architecture depending on hyperparameter
+        # for number of fully connected layers
         if self.num_layers == 2:
             self.bvds_regressor = nn.Sequential(
+                # FC layer uses hidden_size * 2 due to forwards and backwards outputs concatenated
                 nn.Linear(hidden_size*2, self.hidden_layer), 
                 nn.ReLU(),
                 nn.Dropout(dropout),
@@ -96,6 +106,7 @@ class BVDSRegressor(L.LightningModule):
             )
         else:
             self.bvds_regressor = nn.Sequential(
+                # FC layer uses hidden_size * 2 due to forwards and backwards outputs concatenated
                 nn.Linear(hidden_size*2, 1),
                 nn.ReLU(),
                 nn.Dropout(dropout),
@@ -104,9 +115,8 @@ class BVDSRegressor(L.LightningModule):
         self.loss_fn = nn.MSELoss()
 
     def forward(self, x):
-        # decode output into bvds
+        # decode LSTM's output into BVDS value
         bvds = self.bvds_regressor(x)
-        
         return bvds
 
     def training_step(self, batch, batch_idx):
@@ -134,6 +144,7 @@ class BVDSRegressor(L.LightningModule):
         return loss
 
     def predict_step(self, batch, batch_idx):
+        # Prediction step which is useful for "predict mode"
         x, y = batch
         x = x.to(self.device_to_use)
         x_hat = self(x)
@@ -144,6 +155,11 @@ class BVDSRegressor(L.LightningModule):
         return optimizer
 
 class MyDataModule(L.LightningDataModule):
+    # DataLoader for each pig's feature timeseries and BVDS features.
+    # Used for upstream LSTM encoding, but only in PREDICT mode.
+    # BVSD features were not loaded in LSTM DataLoader, 
+    # so they are recreated here with identical train/val/test partitions
+
     def __init__(self, data_directory, num_pigs, test_pig_num, bvds_mode,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                  batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15):
@@ -168,6 +184,7 @@ class MyDataModule(L.LightningDataModule):
         pass
 
     def set_prediction_mode(self, mode):
+        # Can set into different modes that only predict, or train, etc.
         self.prediction_mode = mode
 
     def setup(self, stage=None):
@@ -184,23 +201,20 @@ class MyDataModule(L.LightningDataModule):
                 labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_{self.bvds_mode}.csv"))[self.label_name].values 
                 self.data_dict[pig_idx][hypovolemia_stage]['features'] = features
                 self.data_dict[pig_idx][hypovolemia_stage]['labels'] = labels
-        # now split
+        # now split into training, validation, and testing sets by pig/stage
         self.prepare_train_val_test()
-        # now save if enabled
-        # save if enabled
 
     def prepare_train_val_test(self):
         # train dataset first
         pigs_for_training = [m+1 for m in range(self.num_pigs) if m+1 != self.test_pig_num]
-        # print("pigs for training: ", pigs_for_training)
-        # print("pig for testing: ", self.test_pig_num)
         train_X = np.empty((0, self.window_size, len(feature_names)))
         train_y = np.empty((0, 1))
         val_X = np.empty((0, self.window_size, len(feature_names)))
         val_y = np.empty((0, 1))
+        #Find which pigs/bvds stages are for training and create dataset with these features
         train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
 
-        # training
+        # training dataset
         for pair in train_pairs:
             (pig_idx, hypovolemia_stage) = pair
             features = self.data_dict[pig_idx][hypovolemia_stage]['features']
@@ -210,7 +224,7 @@ class MyDataModule(L.LightningDataModule):
                                                                            overlap_percentage=self.overlap_percentage)
             train_X = np.vstack((train_X, ts_features))
             train_y = np.vstack((train_y, ts_labels.reshape(-1, 1)))
-        # validation
+        # validation dataset
         for pair in val_pairs:
             (pig_idx, hypovolemia_stage) = pair
             features = self.data_dict[pig_idx][hypovolemia_stage]['features']
@@ -232,17 +246,9 @@ class MyDataModule(L.LightningDataModule):
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage)
             self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
-
             test_X = np.vstack((test_X, ts_features))
             test_y = np.vstack((test_y, ts_labels.reshape(-1, 1)))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
-        # print("Train x shape: ", train_X.shape)
-        # print("Train y shape: ", train_y.shape)
-        # print("Val x shape: ", val_X.shape)
-        # print("Val y shape: ", val_y.shape)
-        # print("Test x shape: ", test_X.shape)
-        # print("Test y shape: ", test_y.shape)
-        # print("Test hypo stages length: ", self.test_hypo_stages.shape)
 
         mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
         train_X_std = (train_X - mean) / std
@@ -269,6 +275,9 @@ class MyDataModule(L.LightningDataModule):
             return DataLoader(self.test, batch_size=self.batch_size, shuffle=False)
 
 class DownstreamDataModule(L.LightningDataModule):
+    # Contains the outputs from the LSTM encoding step as the x "features"
+    # And the same BVDS y labels from the previous dataloader
+    # Will be used in BVDS downstream regressor
     def __init__(self, encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
                   encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, bvds_mode,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
@@ -280,6 +289,8 @@ class DownstreamDataModule(L.LightningDataModule):
         self.label_name = 'Class' if bvds_mode=='classification' else 'BVDS' #kept this logic for future implementation for downstream task
         self.num_pigs = num_pigs
         self.test_pig_num = test_pig_num
+        # "Hyperparameters" that are from the previous DataLoader or
+        # are hidden layer outputs from the LSTM encoder
         self.all_hypovolemia_stages = all_hypovolemia_stages
         self.train_hypovolemia_stages = train_hypovolemia_stages
         self.test_hypovolemia_stages = test_hypovolemia_stages
@@ -298,8 +309,6 @@ class DownstreamDataModule(L.LightningDataModule):
     def setup(self, stage=None):
         # now split
         self.prepare_train_val_test()
-        # now save if enabled
-        # save if enabled
 
     def prepare_train_val_test(self):
         # train dataset first
@@ -312,13 +321,6 @@ class DownstreamDataModule(L.LightningDataModule):
         val_y = self.bvds_labels_val
         test_X = self.encoded_predictions_test.squeeze()
         test_y = self.bvds_labels_test
-
-        # print("Train x shape: ", train_X.shape)
-        # print("Train y shape: ", train_y.shape)
-        # print("Val x shape: ", val_X.shape)
-        # print("Val y shape: ", val_y.shape)
-        # print("Test x shape: ", test_X.shape)
-        # print("Test y shape: ", test_y.shape)
 
         self.train = TimeSeriesDataset(train_X, train_y, [])
         self.validate = TimeSeriesDataset(val_X, val_y, [])
@@ -397,7 +399,6 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
     # create pairs of subjects x hypovolemia stages
     # pick 20% and use them as validaiton
     # this one picks one hypovolemia stage directly - since there are 5 training pigs, it corresponds to 20% directly
-    random.seed(42)
 
     pairs = [(x, y) for x in subject_indices for y in hypovolemia_stages]
     # Create separate lists for each element of
@@ -405,7 +406,12 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
     # each key is a hypovolemia stage, each value is a list of tuples (pig_idx, hypovolemia stage)
     for pair in pairs:
         hypo_stage_pairs[pair[1]].append(pair)
-    # Shuffle each list
+
+    # Shuffle each list. Reseed random sequence so it has IDENTICAL pairings as upstream task!!!
+    # Using same seed as in LSTM model
+    # NOTE: Need to look into this if there is a better way to ensure. Maybe have train/val pairs saved 
+    # and imported from LSTM model?
+    random.seed(random_seed)
     for key in hypo_stage_pairs:
         random.shuffle(hypo_stage_pairs[key])
 
@@ -451,6 +457,7 @@ def get_filename_with_min_val_loss(directory, model_string, direction):
     return best_model_path
 
 def report_results(gt, predictions, hypovolemia_stages, results, subj_idx):
+    # Find overall test results for each stage, pig, and average
     overall_rmse = mean_squared_error(gt, predictions, squared=False)
     unique_stages = list(np.unique(hypovolemia_stages))
     print("unique stages: ", unique_stages)
@@ -464,6 +471,12 @@ def report_results(gt, predictions, hypovolemia_stages, results, subj_idx):
     print("Overall RMSE score: ", overall_rmse)
     results[subj_idx]['overall'] = overall_rmse
 
+
+#############################################################################################################
+#############################################################################################################
+############## MAIN CODE below, ONLY for Forecast/Backcast Autoreg Upstream Models ##########################
+#############################################################################################################
+
 def objective():
 
     if not wandb.run:
@@ -471,7 +484,9 @@ def objective():
     wandb.init(settings=wandb.Settings(code_dir="."))
     config = wandb.config
 
+    # Check if running locally or on server
     hostname = socket.gethostname()
+    # Find data directory based on host machine (hardcoded to Samuel Liu's environments)
     if hostname == 'samue':
         project_dir = r"C:\\Users\\samue\\OneDrive - Georgia Institute of Technology\\GT Files\\ECE 8903 I02\\SamuelCode\\HypovolemiaSamuel"
         data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\Samuel Liu\\HypovolemiaSamuel\\Data"
@@ -481,12 +496,14 @@ def objective():
     else:
         raise ValueError("Unknown environment")
 
-    mode = 'test'   # train or test
-    bvds_model_str = '0907-2312' # string representing bvds DOWNSTREAM model ran with specific architecture.
-
+    # Edit mode below:
     # train - trains the model and saves the best model in terms of validation loss
     # test - loads the model with the minimum loss inside Model directory
-    # while loading be careful - current code looks at minimum loss model 
+    mode = 'test'   # train or test
+
+    # while loading be careful - current code looks at minimum loss model
+    # UNLESS model_str designates which BVDS downstream model to use
+    bvds_model_str = '0907-2312' # string representing bvds DOWNSTREAM model ran with specific architecture.
 
     training_mode = 'regression'  # regression or classification
     # regression maps to [0, 100] interval
@@ -508,7 +525,7 @@ def objective():
     window_size = 60
     batch_size = 128
     test_pig_nums = [1, 2, 3, 4, 5, 6]   # for each pig we will a create a different model by excluding that pig
-    # some parameters we might play with
+    # some parameters we might play with; Edit in hyperparameter section
     hidden_size = config.hidden_size
     hidden_layer = config.hidden_layer
     num_layers = config.num_layers
@@ -519,8 +536,10 @@ def objective():
     dropout = config.dropout
     epochs = config.epochs
     overlap = config.overlap
-    autoreg_model_str = config.autoreg_model_str # string representing autoregressor model ran with specific architecture. for example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
-    
+
+    # string representing autoregressor model ran with specific architecture. 
+    # For example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
+    autoreg_model_str = config.autoreg_model_str 
 
     # N * T * F
         # N: batch size
@@ -530,11 +549,16 @@ def objective():
         # 2 is for future/past prediction
         # M: length of forecast/
 
+
+############################################################################################################
+################# Section is for TRAINING a new downstream model with forecast/backcast ####################
+
     if mode == 'train':
         #model run name timestamp for easy access
         model_run_str = time.strftime("%m%d-%H%M")
         model_str_dict = {'bvds_model_str': model_run_str}
-        wandb.log(model_str_dict)
+        wandb.log(model_str_dict) # save so wandb can name this model too
+
         for test_pig_num in test_pig_nums:
             print(f"Training for Pig {test_pig_num} Started")
             # where you save your model
@@ -543,6 +567,7 @@ def objective():
             if not os.path.exists(model_output_dir):
                 os.makedirs(model_output_dir)
       
+            # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
             data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
                                 all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                                 batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
@@ -557,12 +582,16 @@ def objective():
 
             wandb_logger = WandbLogger(log_model=True)
 
+            # Finding which (good) LSTM upstream model to use, both forwards and backwards
             autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
             checkpoint_path_f = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
             checkpoint_path_b = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'b') #get best backward autoreg model
             autoreg_model_f = RNNAutoregressor.load_from_checkpoint(checkpoint_path_f)
             autoreg_model_b = RNNAutoregressor.load_from_checkpoint(checkpoint_path_b)
+
+            # Use both forward and backward models from LSTM
+            # Set to eval mode, which only runs the encode step and returns hidden layer
             autoreg_model_f.eval()
             autoreg_model_b.eval()
 
@@ -570,13 +599,19 @@ def objective():
 
             #create separate data modules for train/test/val pigs for lstm encoder
             data_module.set_prediction_mode('train')
+            # Uses predict to run encoder in LSTM only and get intermediate hidden layers
+            # Note: all of train, val, and test will be fed through the prediction, as they 
+            # all must be used in the downstream as well for its own train/val/test
             encoded_predictions_train_f = trainer.predict(autoreg_model_f, data_module) #check seeding for train/val pairings!
             encoded_predictions_train_f = torch.cat(encoded_predictions_train_f, dim=0).numpy()
             encoded_predictions_train_b = trainer.predict(autoreg_model_b, data_module)
             encoded_predictions_train_b = torch.cat(encoded_predictions_train_b, dim=0).numpy()
+            # Assigns labels to be the BVDS values
             bvds_labels_train = data_module.train.labels
+            # Merges both the forwards, backwards outputs into one feature array
             encoded_predictions_train = np.concatenate((encoded_predictions_train_f, encoded_predictions_train_b), axis=2)
 
+            # Repeat for validation set, which should be identical with the upstream set since using same seed
             data_module.set_prediction_mode('val')
             encoded_predictions_val_f = trainer.predict(autoreg_model_f, data_module)
             encoded_predictions_val_f = torch.cat(encoded_predictions_val_f, dim=0).numpy()
@@ -585,6 +620,7 @@ def objective():
             bvds_labels_val = data_module.validate.labels
             encoded_predictions_val = np.concatenate((encoded_predictions_val_f, encoded_predictions_val_b), axis=2)
 
+            # Repeat for test set, which should be identical with the upstream set since using same seed
             data_module.set_prediction_mode('test')
             encoded_predictions_test_f = trainer.predict(autoreg_model_f, data_module)
             encoded_predictions_test_f = torch.cat(encoded_predictions_test_f, dim=0).numpy()
@@ -594,22 +630,31 @@ def objective():
             bvds_labels_test = data_module.test.labels
             bvds_hypo_stages_test = data_module.test.hypo_stages
 
-            encoded_data_module = DownstreamDataModule(encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
-                                                        encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, training_mode, 
-                                                        all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages, batch_size=batch_size)
+            # Combine all these hidden layers, BVDS labels into DataLoader for downstream regressor
+            encoded_data_module = DownstreamDataModule(
+                encoded_predictions_train, bvds_labels_train, 
+                encoded_predictions_val, bvds_labels_val,      
+                encoded_predictions_test, bvds_labels_test, 
+                bvds_hypo_stages_test, num_pigs, 
+                test_pig_num, training_mode, 
+                all_hypovolemia_stages, train_hypovolemia_stages, 
+                test_hypovolemia_stages, batch_size=batch_size
+                )
 
-
+            # Initialize downstream regressor model
             model = BVDSRegressor(test_pig=test_pig_num, hidden_size=autoreg_model_f.encoder.hidden_size, learning_rate=learning_rate, 
                                   weight_decay=weight_decay, l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE,
                                     max_epochs=epochs, hidden_layer=hidden_layer, num_layers=num_layers)
             trainer = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback], max_epochs=epochs)
-
+            # Train downstream regressor model
             trainer.fit(model, encoded_data_module)
+
+        # After training, make sure bvds_model_str is the same as the upstream model_run_str for easy searching
         bvds_model_str = model_run_str
 
-    ###########################################################################################
-    #Testing for bvds downstream (will run automatically if training)
-    ###########################################################################################
+##########################################################################################################
+########### Section is for TESTING for bvds downstream (will run automatically if training) ##############
+
     results = {}
     for test_pig_num in test_pig_nums:
         model_output_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
@@ -618,7 +663,8 @@ def objective():
         print("######################################################################")
         print(f"Testing for Pig {test_pig_num} Started")
         print("######################################################################")
-
+        
+        # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
         data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
                             all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                             batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
@@ -633,6 +679,7 @@ def objective():
 
         wandb_logger = WandbLogger(log_model=True)
 
+        # Find upstream autoregressor forecast/backcast models to predict and get hidden layer
         autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                         folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
         checkpoint_path_f = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
@@ -670,12 +717,21 @@ def objective():
         bvds_labels_test = data_module.test.labels
         bvds_hypo_stages_test = data_module.test.hypo_stages
 
-        encoded_data_module = DownstreamDataModule(encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
-                                                    encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, training_mode, 
-                                                    all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages, batch_size=batch_size)
+        # Combine these hidden layers, BVDS labels into new DataLoader for downstream regressor model
+        # Note: Only the test set will be used in this testing portion.
+        encoded_data_module = DownstreamDataModule(
+            encoded_predictions_train, bvds_labels_train, 
+            encoded_predictions_val, bvds_labels_val,
+            encoded_predictions_test, bvds_labels_test, 
+            bvds_hypo_stages_test, num_pigs, test_pig_num, 
+            training_mode, all_hypovolemia_stages, 
+            train_hypovolemia_stages, test_hypovolemia_stages, 
+            batch_size=batch_size
+            )
         
         # encoded_data_module.setup()
 
+        # Find which downstream BVDS regressor model to load and test
         bvds_model_dir = os.path.join(project_dir, 'Models', 'DownstreamModel',
                                         folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
         checkpoint_path = get_filename_with_min_val_loss(bvds_model_dir, bvds_model_str, '')
@@ -683,9 +739,11 @@ def objective():
         model.eval()
         trainer = L.Trainer()
 
+        # Get predictions for BVDS
         predictions = trainer.predict(model, encoded_data_module)
         predictions = torch.cat(predictions, dim=0).numpy()
 
+        # Consolidating overall results + classifying
         gt_data = data_module.test.labels
         if training_mode == 'classification':
             # first convert class labels to correct values
@@ -714,8 +772,16 @@ def objective():
 
     wandb.finish()
 
+
+##########################################################################################################
+###################### Section is for SETTING HYPERPARAMETERS ############################################
+
 if __name__ == "__main__":
-    # Define the search space
+    ###### Change to True to sweep of hyperparameters! #########
+    perform_sweep = False #change to True if want to run sweep of parameters
+    wandbproject = "DownstreamBVDS"
+    hostname = socket.gethostname()
+
     sweep_configuration = {
         "method": "random",
         "metric": {"goal": "minimize", "name": "val_loss"},
@@ -723,25 +789,32 @@ if __name__ == "__main__":
             "learning_rate": {"values": [0.001]},
             "weight_decay": {"values": [0.0005]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [256]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
+            "hidden_size": {"values": [256]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL! (Edit: will automatically)
             "forecast_size": {"values": [10]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
-            "hidden_layer": {"values": [64]},
-            "num_layers": {"values": [2]},
+            "hidden_layer": {"values": [64]}, #This is for the downstream fully connected layers if num_layers=2
+            "num_layers": {"values": [2]}, #This is for the downstream fully connected layers
             "dropout": {"values": [0]},
-            "autoreg_model_str": {"values": ['0728-0329', '0728-0752', '0728-0920', '0729-1024', '0729-1224']}
+            # IMPORTANT BELOW: names of upstream TRAINED LSTM models to use
+            "autoreg_model_str": {"values": [
+                '1003-0041', 
+                '1003-0055', 
+                '1003-0128', 
+                '1003-0257', 
+                '1003-0404', 
+                '1003-0513', 
+                '1003-0614', 
+                '1003-0642'
+                ]}
         },
     }
-    perform_sweep = False #change to True if want to run sweep of parameters
-
-    hostname = socket.gethostname()
-    wandbproject = "DownstreamBVDS"
 
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
         wandb.agent(sweep_id, function=objective, count=5)
     else:
+        # For Non-sweeps, edit hyperparameters for single runs
         wandb.init(project=wandbproject, config={
             "learning_rate": 0.001,
             "weight_decay": 0.0005,
@@ -750,9 +823,10 @@ if __name__ == "__main__":
             "forecast_size": 10,
             "overlap": 0.9,
             "epochs": 40,
-            "hidden_layer": 64,
-            "num_layers": 2,
+            "hidden_layer": 64, #This is for the downstream fully connected layers if num_layers=2
+            "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
+            # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
             "autoreg_model_str": '0729-1024',
         }, save_code=True)
         objective()
