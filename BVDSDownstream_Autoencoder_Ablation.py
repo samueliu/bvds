@@ -583,10 +583,12 @@ def objective():
             # Finding which (good) LSTM upstream model to use, both forwards and backwards
             autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                             folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-            checkpoint_path_f = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
-            autoreg_model_f = RNNAutoregressor.load_from_checkpoint(checkpoint_path_f)
+            checkpoint_path_autoreg = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
+            if checkpoint_path_autoreg == None: 
+                checkpoint_path_autoreg = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'b') #if no forward then ablation is for backwards
+            autoreg_model = RNNAutoregressor.load_from_checkpoint(checkpoint_path_autoreg)
             # Using _f model for autoencoder as no forwards and backwards casting was done. model labeled _f by default.
-            autoreg_model_f.eval()
+            autoreg_model.eval()
 
             trainer = L.Trainer()
 
@@ -595,20 +597,20 @@ def objective():
             # Uses predict to run encoder in LSTM only and get intermediate hidden layers
             # Note: all of train, val, and test will be fed through the prediction, as they 
             # all must be used in the downstream as well for its own train/val/test
-            encoded_predictions_train_f = trainer.predict(autoreg_model_f, data_module) #check seeding for train/val pairings!
+            encoded_predictions_train_f = trainer.predict(autoreg_model, data_module) #check seeding for train/val pairings!
             encoded_predictions_train = torch.cat(encoded_predictions_train_f, dim=0).numpy()
             # Assigns labels to be the BVDS values
             bvds_labels_train = data_module.train.labels
             
             # Repeat for validation set, which should be identical with the upstream set since using same seed
             data_module.set_prediction_mode('val')
-            encoded_predictions_val_f = trainer.predict(autoreg_model_f, data_module)
+            encoded_predictions_val_f = trainer.predict(autoreg_model, data_module)
             encoded_predictions_val = torch.cat(encoded_predictions_val_f, dim=0).numpy()
             bvds_labels_val = data_module.validate.labels
 
             # Repeat for test set, which should be identical with the upstream set since using same seed
             data_module.set_prediction_mode('test')
-            encoded_predictions_test_f = trainer.predict(autoreg_model_f, data_module)
+            encoded_predictions_test_f = trainer.predict(autoreg_model, data_module)
             encoded_predictions_test = torch.cat(encoded_predictions_test_f, dim=0).numpy()
             bvds_labels_test = data_module.test.labels
             bvds_hypo_stages_test = data_module.test.hypo_stages
@@ -625,7 +627,7 @@ def objective():
                 )
 
             # Initialize downstream regressor model
-            model = BVDSRegressor(test_pig=test_pig_num, hidden_size=autoreg_model_f.encoder.hidden_size, learning_rate=learning_rate, 
+            model = BVDSRegressor(test_pig=test_pig_num, hidden_size=autoreg_model.encoder.hidden_size, learning_rate=learning_rate, 
                                   weight_decay=weight_decay, l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE,
                                     max_epochs=epochs, hidden_layer=hidden_layer, num_layers=num_layers)
             trainer = L.Trainer(logger=wandb_logger, callbacks=[MyProgressBar(), checkpoint_callback], max_epochs=epochs)
@@ -666,25 +668,27 @@ def objective():
         # Find upstream autoencoder model to predict and get hidden layer
         autoreg_model_dir = os.path.join(project_dir, 'Models', 'TimeSeriesModel',
                                         folder_name_to_save, f'Pig{test_pig_num}-{training_mode}')
-        checkpoint_path_f = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
-        autoreg_model_f = RNNAutoregressor.load_from_checkpoint(checkpoint_path_f)
-        autoreg_model_f.eval()
+        checkpoint_path_autoreg = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'f') #get best forward autoreg model
+        if checkpoint_path_autoreg == None: 
+            checkpoint_path_autoreg = get_filename_with_min_val_loss(autoreg_model_dir, autoreg_model_str, 'b') #if no forward then ablation is for backwards
+        autoreg_model = RNNAutoregressor.load_from_checkpoint(checkpoint_path_autoreg)
+        autoreg_model.eval()
 
         trainer = L.Trainer()
         
         #create separate data modules for train/test/val pigs for lstm encoder
         data_module.set_prediction_mode('train')
-        encoded_predictions_train_f = trainer.predict(autoreg_model_f, data_module) #check seeding for train/val pairings!
+        encoded_predictions_train_f = trainer.predict(autoreg_model, data_module) #check seeding for train/val pairings!
         encoded_predictions_train = torch.cat(encoded_predictions_train_f, dim=0).numpy()
         bvds_labels_train = data_module.train.labels
 
         data_module.set_prediction_mode('val')
-        encoded_predictions_val_f = trainer.predict(autoreg_model_f, data_module)
+        encoded_predictions_val_f = trainer.predict(autoreg_model, data_module)
         encoded_predictions_val = torch.cat(encoded_predictions_val_f, dim=0).numpy()
         bvds_labels_val = data_module.validate.labels
 
         data_module.set_prediction_mode('test')
-        encoded_predictions_test_f = trainer.predict(autoreg_model_f, data_module)
+        encoded_predictions_test_f = trainer.predict(autoreg_model, data_module)
         encoded_predictions_test = torch.cat(encoded_predictions_test_f, dim=0).numpy()
         bvds_labels_test = data_module.test.labels
         bvds_hypo_stages_test = data_module.test.hypo_stages

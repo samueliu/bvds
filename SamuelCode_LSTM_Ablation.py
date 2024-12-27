@@ -624,6 +624,7 @@ def objective():
     dropout = config.dropout
     epochs = config.epochs
     overlap = config.overlap
+    ablation_mode = config.ablation_mode
     
     # N * T * F
         # N: batch size
@@ -649,7 +650,7 @@ def objective():
             if not os.path.exists(model_output_dir):
                 os.makedirs(model_output_dir)
                 
-            if forecast_size > 0: # Creates backwards autoregressor if not autoencoder
+            if forecast_size > 0 and ablation_mode == 1: # Creates backwards autoregressor if not autoencoder
 
                 # Creates DataLoader w/ timeseries backcast
                 data_module_backward = MyDataModule(
@@ -683,43 +684,45 @@ def objective():
 
                 #data_module_backward.setup() # Uncomment, run if not using trainer
 
-            # Creates DataLoader w/ timeseries forecast OR autoencoder if forecast=0
-            data_module_forward = MyDataModule(
-                data_dir, num_pigs, test_pig_num, training_mode,
-                all_hypovolemia_stages, train_hypovolemia_stages, 
-                test_hypovolemia_stages, batch_size=batch_size, 
-                overlap_percentage=overlap, window_size=window_size, 
-                forecast_size=forecast_size, 
-                direction=1 # direction 1 = forwards
+            if forecast_size > 0 and ablation_mode == 0: # Creates forwards autoregressor if not autoencoder
+
+                # Creates DataLoader w/ timeseries forecast OR autoencoder if forecast=0
+                data_module_forward = MyDataModule(
+                    data_dir, num_pigs, test_pig_num, training_mode,
+                    all_hypovolemia_stages, train_hypovolemia_stages, 
+                    test_hypovolemia_stages, batch_size=batch_size, 
+                    overlap_percentage=overlap, window_size=window_size, 
+                    forecast_size=forecast_size, 
+                    direction=1 # direction 1 = forwards
+                    )
+                
+                # Creates Forwards-Predicting Autoregressor Model OR Autoencoder if forecast=0
+                model_forward = RNNAutoregressor(
+                    test_pig=test_pig_num, in_channels=len(feature_names), 
+                    hidden_size=hidden_size, window_size=window_size, 
+                    forecast_size=forecast_size, output_size=len(feature_names),
+                    hidden_layer=hidden_layer, num_layers=num_layers,
+                    learning_rate=learning_rate, weight_decay=weight_decay, 
+                    l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE, 
+                    max_epochs=epochs, running_loss=running_loss, 
+                    direction=1 # direction 1 = forwards
+                    ) 
+                
+                # Checkpoint callback for Forwards Autoregressor/Autoencoder
+                checkpoint_callback_forward = ModelCheckpoint(
+                    dirpath=model_output_dir,
+                    filename='model_f-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
+                    monitor='val_loss',   # we want to save the model based on validation loss
+                    mode='min',   # we want to minimize validation loss
+                    save_top_k=1
                 )
-            
-            # Creates Forwards-Predicting Autoregressor Model OR Autoencoder if forecast=0
-            model_forward = RNNAutoregressor(
-                test_pig=test_pig_num, in_channels=len(feature_names), 
-                hidden_size=hidden_size, window_size=window_size, 
-                forecast_size=forecast_size, output_size=len(feature_names),
-                hidden_layer=hidden_layer, num_layers=num_layers,
-                learning_rate=learning_rate, weight_decay=weight_decay, 
-                l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE, 
-                max_epochs=epochs, running_loss=running_loss, 
-                direction=1 # direction 1 = forwards
-                ) 
-            
-            # Checkpoint callback for Forwards Autoregressor/Autoencoder
-            checkpoint_callback_forward = ModelCheckpoint(
-                dirpath=model_output_dir,
-                filename='model_f-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
-                monitor='val_loss',   # we want to save the model based on validation loss
-                mode='min',   # we want to minimize validation loss
-                save_top_k=1
-            )
 
             # Initialize wandb logger to view stats
             wandb_logger = WandbLogger(log_model=True)
 
             # Two trainers, one for backwards, one for forwards. 
             # Creating backwards trainer if not autoencoder
-            if forecast_size > 0:
+            if forecast_size > 0 and ablation_mode == 1:
                 trainer_backwards = L.Trainer(
                     logger=wandb_logger, callbacks=[MyProgressBar(), 
                     checkpoint_callback_backward], max_epochs=epochs
@@ -727,11 +730,12 @@ def objective():
                 trainer_backwards.fit(model_backward, data_module_backward)
 
             # Creating trainer for forwards autoregressor or autoencoder
-            trainer_forwards = L.Trainer(
-                logger=wandb_logger, callbacks=[MyProgressBar(), 
-                checkpoint_callback_forward], max_epochs=epochs
-                )
-            trainer_forwards.fit(model_forward, data_module_forward)
+            if forecast_size > 0 and ablation_mode == 0:
+                trainer_forwards = L.Trainer(
+                    logger=wandb_logger, callbacks=[MyProgressBar(), 
+                    checkpoint_callback_forward], max_epochs=epochs
+                    )
+                trainer_forwards.fit(model_forward, data_module_forward)
 
 
 ##########################################################################################################
@@ -783,6 +787,7 @@ def objective():
 
 ##########################################################################################################
 ###################### Section is for SETTING HYPERPARAMETERS ############################################
+# NOTE: Can very easily have added ablation to main code, but kept separate for ease of analysis on wandb.
     
 if __name__ == "__main__":
     
@@ -807,13 +812,15 @@ if __name__ == "__main__":
             "num_layers": {"values": [1, 2]}, # Layers of LSTM 
             "dropout": {"values": [0]}, # Dropout rate
             "window_size": {"values": [30, 60]}, # Timeseries window to train on
+            # Edit this for ablation study for forecast/backcast
+            "ablation_mode": {"values": [0, 1]}, # Set ablation to 0 for forecast only, 1 for backcast only
         },
     }
 
     # Initialize wandb for hyperparameter sweep
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=12)
+        wandb.agent(sweep_id, function=objective, count=16)
     else:
 
         # For Non-sweeps, edit hyperparameters for single runs
@@ -828,7 +835,9 @@ if __name__ == "__main__":
             "hidden_layer": 48, # Keep at 0, unless you want multiple FC layers in DECODER
             "num_layers": 1, # Layers of LSTM 
             "dropout": 0, # Dropout rate
-            "window_size": 30 # Timeseries window to train on
+            "window_size": 30, # Timeseries window to train on
+            # Edit this for ablation study for forecast/backcast
+            "ablation_mode": 0 # Set ablation to 0 for forecast only, 1 for backcast only
         }, save_code=True)
 
         objective()

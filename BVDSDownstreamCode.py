@@ -556,8 +556,7 @@ def objective():
     if mode == 'train':
         #model run name timestamp for easy access
         model_run_str = time.strftime("%m%d-%H%M")
-        model_str_dict = {'bvds_model_str': model_run_str}
-        wandb.log(model_str_dict) # save so wandb can name this model too
+        wandb.log({'bvds_model_str': model_run_str}) # save so wandb can name this model too
 
         for test_pig_num in test_pig_nums:
             print(f"Training for Pig {test_pig_num} Started")

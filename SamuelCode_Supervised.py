@@ -241,18 +241,19 @@ class Decoder(nn.Module):
         return out, (hn1, cn1)
     
 class MyDataModule(L.LightningDataModule):
-    # DataLoader for each pig's feature timeseries and reconstruction windows,
-    # which are either a forecast/backcast or an autoencoding of the same window
+    # DataLoader for each pig's feature timeseries and BVDS features.
+    # Used for upstream LSTM encoding, but only in PREDICT mode.
+    # BVSD features were not loaded in LSTM DataLoader, 
+    # so they are recreated here with identical train/val/test partitions
 
     def __init__(self, data_directory, num_pigs, test_pig_num, bvds_mode,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15, direction=0): 
+                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15):
         super().__init__()
         # train/test_hypovolemia_stages = ['Absolute', 'Relative', 'Resuscitation']
         # these are here in case you want to train/test your model using certain stages
         self.data_directory = data_directory
-        # bvds_mode = 'classification' or 'regression' unchanged from original
-        self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   
+        self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   # bvds_mode = 'classification' or 'regression' unchanged from original
         self.label_name = 'Class' if bvds_mode=='classification' else 'BVDS' #kept this logic for future implementation for downstream task
         self.num_pigs = num_pigs
         self.test_pig_num = test_pig_num
@@ -264,10 +265,13 @@ class MyDataModule(L.LightningDataModule):
         self.window_size = window_size   # how many time steps you want in a single window
         self.forecast_size = forecast_size # how many samples you want to predict in the future/past
         self.prediction_mode = 'train'
-        self.direction = direction
 
     def prepare_data(self):
         pass
+
+    def set_prediction_mode(self, mode):
+        # Can set into different modes that only predict, or train, etc.
+        self.prediction_mode = mode
 
     def setup(self, stage=None):
         self.data_dict = {}
@@ -279,116 +283,67 @@ class MyDataModule(L.LightningDataModule):
             for hypovolemia_stage in self.all_hypovolemia_stages:
                 self.data_dict[pig_idx][hypovolemia_stage] = {}
                 data_path = os.path.join(self.data_directory, hypovolemia_stage)
-                # x: "features"
-                # y: "labels"
-                # Both features and labels are derived from timeseries for reconstruction
                 features = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
-                # # Removed BVDS labels, since focus is on feature forecasting but kept for later implementation in downstream task
-                # labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_{self.bvds_mode}.csv"))[self.label_name].values 
-                labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
+                labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_{self.bvds_mode}.csv"))[self.label_name].values 
                 self.data_dict[pig_idx][hypovolemia_stage]['features'] = features
                 self.data_dict[pig_idx][hypovolemia_stage]['labels'] = labels
         # now split into training, validation, and testing sets by pig/stage
         self.prepare_train_val_test()
 
-    def set_prediction_mode(self, mode):
-        # Can set into different modes that only predict, or train, etc.
-        self.prediction_mode = mode
-
     def prepare_train_val_test(self):
         # train dataset first
         pigs_for_training = [m+1 for m in range(self.num_pigs) if m+1 != self.test_pig_num]
-        print("pigs for training: ", pigs_for_training)
-        print("pig for testing: ", self.test_pig_num)
-
-        # Preparing training set
         train_X = np.empty((0, self.window_size, len(feature_names)))
+        train_y = np.empty((0, 1))
         val_X = np.empty((0, self.window_size, len(feature_names)))
-        if self.forecast_size == 0: # For autoencoding, predicting the same window
-            train_y = np.empty((0, self.window_size, len(feature_names)))
-            val_y = np.empty((0, self.window_size, len(feature_names)))
-        else: # For forecast/backcast autoregressor
-            train_y = np.empty((0, self.forecast_size, len(feature_names)))
-            val_y = np.empty((0, self.forecast_size, len(feature_names)))
+        val_y = np.empty((0, 1))
         #Find which pigs/bvds stages are for training and create dataset with these features
         train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
 
-        # Create separate dataset for the training data
+        # training dataset
         for pair in train_pairs:
             (pig_idx, hypovolemia_stage) = pair
             features = self.data_dict[pig_idx][hypovolemia_stage]['features']
             labels = self.data_dict[pig_idx][hypovolemia_stage]['labels']
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, 
-                                                                           direction=self.direction)
+                                                                           overlap_percentage=self.overlap_percentage)
             train_X = np.vstack((train_X, ts_features))
-            if self.forecast_size == 0:
-                train_y = np.vstack((train_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
-            else:
-                train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
-
-        # Create separate dataset for the validation data
+            train_y = np.vstack((train_y, ts_labels.reshape(-1, 1)))
+        # validation dataset
         for pair in val_pairs:
             (pig_idx, hypovolemia_stage) = pair
             features = self.data_dict[pig_idx][hypovolemia_stage]['features']
             labels = self.data_dict[pig_idx][hypovolemia_stage]['labels']
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, 
-                                                                           direction=self.direction)
+                                                                           overlap_percentage=self.overlap_percentage)
             val_X = np.vstack((val_X, ts_features))
-            if self.forecast_size == 0:
-                val_y = np.vstack((val_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
-            else:
-                val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            val_y = np.vstack((val_y, ts_labels.reshape(-1, 1)))
 
-
-        # For the test pig, create another dataset:
+        # for the test pig
         test_X = np.empty((0, self.window_size, len(feature_names)))
-        if self.forecast_size == 0:
-            test_y = np.empty((0, self.window_size, len(feature_names)))
-        else:
-            test_y = np.empty((0, self.forecast_size, len(feature_names)))
-
+        test_y = np.empty((0, 1))
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
             features = self.data_dict[self.test_pig_num][hypovolemia_stage]['features']
             labels = self.data_dict[self.test_pig_num][hypovolemia_stage]['labels']
             ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, 
-                                                                           direction=self.direction)
+                                                                           overlap_percentage=self.overlap_percentage)
             self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
-
             test_X = np.vstack((test_X, ts_features))
-            if self.forecast_size == 0:
-                test_y = np.vstack((test_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
-            else:
-                test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            test_y = np.vstack((test_y, ts_labels.reshape(-1, 1)))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
 
-        print("Train x shape: ", train_X.shape)
-        print("Val x shape: ", val_X.shape)
-        print("Test x shape: ", test_X.shape)
-        print("Test hypo stages length: ", self.test_hypo_stages.shape)
-
-        # Changed to calculate mean, std from overall window (including forecast/backcast)
-        # for consistent normalization
-        mean, std = get_timeseries_standardizer(train_X) 
+        mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
         train_X_std = (train_X - mean) / std
         val_X_std = (val_X - mean) / std
-        test_X_std = (test_X - mean) / std
-        train_Y_std = (train_y - mean) / std
-        val_Y_std = (val_y - mean) / std
-        test_Y_std = (test_y - mean) / std   
+        test_X_std = (test_X - mean) / std 
 
-        self.train = TimeSeriesDataset(train_X_std, train_Y_std, [])
-        self.validate = TimeSeriesDataset(val_X_std, val_Y_std, [])
-        self.test = TimeSeriesDataset(test_X_std, test_Y_std, self.test_hypo_stages)
+        self.train = TimeSeriesDataset(train_X_std, train_y, [])
+        self.validate = TimeSeriesDataset(val_X_std, val_y, [])
+        self.test = TimeSeriesDataset(test_X_std, test_y, self.test_hypo_stages)
 
     def train_dataloader(self):
         return DataLoader(self.train, batch_size=self.batch_size, shuffle=True)
@@ -396,6 +351,7 @@ class MyDataModule(L.LightningDataModule):
         return DataLoader(self.validate, batch_size=self.batch_size, shuffle=False)
     def test_dataloader(self):
         return DataLoader(self.test, batch_size=self.batch_size, shuffle=False)
+    #IMPORTANT: Change predict mode between train, val, test, etc.
     def predict_dataloader(self):
         if self.prediction_mode == 'train':
             return DataLoader(self.train, batch_size=self.batch_size, shuffle=False)
@@ -813,7 +769,7 @@ if __name__ == "__main__":
     # Initialize wandb for hyperparameter sweep
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=12)
+        wandb.agent(sweep_id, function=objective, count=16)
     else:
 
         # For Non-sweeps, edit hyperparameters for single runs
