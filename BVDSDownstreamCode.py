@@ -322,6 +322,10 @@ class DownstreamDataModule(L.LightningDataModule):
         test_X = self.encoded_predictions_test.squeeze()
         test_y = self.bvds_labels_test
 
+        print("DOWNSTREAM Train x shape: ", train_X.shape)
+        print("DOWNSTREAM Val x shape: ", val_X.shape)
+        print("DOWNSTREAM Test x shape: ", test_X.shape)
+
         self.train = TimeSeriesDataset(train_X, train_y, [])
         self.validate = TimeSeriesDataset(val_X, val_y, [])
         self.test = TimeSeriesDataset(test_X, test_y, self.bvds_hypo_stages_test)
@@ -499,7 +503,7 @@ def objective():
     # Edit mode below:
     # train - trains the model and saves the best model in terms of validation loss
     # test - loads the model with the minimum loss inside Model directory
-    mode = 'test'   # train or test
+    mode = 'train'   # train or test
 
     # while loading be careful - current code looks at minimum loss model
     # UNLESS model_str designates which BVDS downstream model to use
@@ -522,14 +526,14 @@ def objective():
         os.makedirs(result_output_dir)
 
     num_pigs = 6
-    window_size = 60
+    window_size = 60 #placeholder, will load from autoreg model
     batch_size = 128
     test_pig_nums = [1, 2, 3, 4, 5, 6]   # for each pig we will a create a different model by excluding that pig
     # some parameters we might play with; Edit in hyperparameter section
     hidden_size = config.hidden_size
     hidden_layer = config.hidden_layer
     num_layers = config.num_layers
-    forecast_size = config.forecast_size
+    forecast_size = config.forecast_size #placeholder, will load from autoreg model
     learning_rate = config.learning_rate
     weight_decay = config.weight_decay
     l1_lambda = config.l1_lambda
@@ -540,6 +544,9 @@ def objective():
     # string representing autoregressor model ran with specific architecture. 
     # For example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
     autoreg_model_str = config.autoreg_model_str 
+
+    wandb.run.name = "bvds_" + autoreg_model_str
+    wandb.run.save()
 
     # N * T * F
         # N: batch size
@@ -566,11 +573,6 @@ def objective():
             if not os.path.exists(model_output_dir):
                 os.makedirs(model_output_dir)
       
-            # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
-            data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
-                                all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                                batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
-
             checkpoint_callback = ModelCheckpoint(
                 dirpath=model_output_dir,
                 filename='model-' + model_run_str + '-{epoch:02d}-{val_loss:.2f}',
@@ -595,6 +597,13 @@ def objective():
             autoreg_model_b.eval()
 
             trainer = L.Trainer()
+
+            # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
+            window_size = autoreg_model_f.window_size
+            forecast_size = autoreg_model_f.forecast_size
+            data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+                            all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                            batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
 
             #create separate data modules for train/test/val pigs for lstm encoder
             data_module.set_prediction_mode('train')
@@ -663,11 +672,6 @@ def objective():
         print(f"Testing for Pig {test_pig_num} Started")
         print("######################################################################")
         
-        # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
-        data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
-                            all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                            batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
-
         checkpoint_callback = ModelCheckpoint(
             dirpath=model_output_dir,
             filename='model-{epoch:02d}-{val_loss:.2f}',
@@ -689,8 +693,16 @@ def objective():
         autoreg_model_b.eval()
 
         trainer = L.Trainer()
+        # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
+        window_size = autoreg_model_f.window_size
+        forecast_size = autoreg_model_f.forecast_size
+        data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+                        all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                        batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
+
         
-        #create separate data modules for train/test/val pigs for lstm encoder
+        #create separate data modules for train/test/val pigs for lstm encoder. This then gets fed into downstream
+        #while keeping train/val/test separate.
         data_module.set_prediction_mode('train')
         encoded_predictions_train_f = trainer.predict(autoreg_model_f, data_module) #check seeding for train/val pairings!
         encoded_predictions_train_f = torch.cat(encoded_predictions_train_f, dim=0).numpy()
@@ -777,12 +789,12 @@ def objective():
 
 if __name__ == "__main__":
     ###### Change to True to sweep of hyperparameters! #########
-    perform_sweep = False #change to True if want to run sweep of parameters
+    perform_sweep = True #change to True if want to run sweep of parameters
     wandbproject = "DownstreamBVDS"
     hostname = socket.gethostname()
 
     sweep_configuration = {
-        "method": "random",
+        "method": "grid",
         "metric": {"goal": "minimize", "name": "val_loss"},
         "parameters": {
             "learning_rate": {"values": [0.001]},
@@ -797,21 +809,15 @@ if __name__ == "__main__":
             "dropout": {"values": [0]},
             # IMPORTANT BELOW: names of upstream TRAINED LSTM models to use
             "autoreg_model_str": {"values": [
-                '1003-0041', 
-                '1003-0055', 
-                '1003-0128', 
-                '1003-0257', 
-                '1003-0404', 
-                '1003-0513', 
-                '1003-0614', 
-                '1003-0642'
+                '1229-0021', 
+                '1228-0110', 
                 ]}
         },
     }
 
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=5)
+        wandb.agent(sweep_id, function=objective, count=2)
     else:
         # For Non-sweeps, edit hyperparameters for single runs
         wandb.init(project=wandbproject, config={
@@ -819,14 +825,14 @@ if __name__ == "__main__":
             "weight_decay": 0.0005,
             "l1_lambda": 0.00,
             "hidden_size": 256, #set to the same dimension as autoregressor!
-            "forecast_size": 10,
+            "forecast_size": 10, #placeholder, will load from autoreg model
             "overlap": 0.9,
             "epochs": 40,
             "hidden_layer": 64, #This is for the downstream fully connected layers if num_layers=2
             "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
             # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
-            "autoreg_model_str": '0729-1024',
+            "autoreg_model_str": '1228-0110',
         }, save_code=True)
         objective()
 

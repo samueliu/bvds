@@ -16,15 +16,15 @@ import time
 import socket
 from pytorch_lightning.loggers import WandbLogger
 
-# Set random seed for reproducibility
-random_seed = 42 # Also remember to change in get_train_val_pairs !!!
-random.seed(random_seed)
-torch.manual_seed(random_seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(random_seed)
-    torch.cuda.manual_seed_all(random_seed)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# # Set random seed for reproducibility
+# random_seed = 42 # Also remember to change in get_train_val_pairs !!!
+# random.seed(random_seed)
+# torch.manual_seed(random_seed)
+# if torch.cuda.is_available():
+#     torch.cuda.manual_seed(random_seed)
+#     torch.cuda.manual_seed_all(random_seed)
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 
 feature_names = ["hr", "hrvDifference", "hrvPoincare", "hrvSpectral",
      "scgPEP", "scgLVET", "scgPEPOverLVET", "scgPAT", "scgPTT",
@@ -246,7 +246,7 @@ class MyDataModule(L.LightningDataModule):
 
     def __init__(self, data_directory, num_pigs, test_pig_num, bvds_mode,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
-                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15, direction=0): 
+                 batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15, direction=0, random_seed=42): 
         super().__init__()
         # train/test_hypovolemia_stages = ['Absolute', 'Relative', 'Resuscitation']
         # these are here in case you want to train/test your model using certain stages
@@ -265,6 +265,7 @@ class MyDataModule(L.LightningDataModule):
         self.forecast_size = forecast_size # how many samples you want to predict in the future/past
         self.prediction_mode = 'train'
         self.direction = direction
+        self.random_seed = random_seed
 
     def prepare_data(self):
         pass
@@ -311,7 +312,7 @@ class MyDataModule(L.LightningDataModule):
             train_y = np.empty((0, self.forecast_size, len(feature_names)))
             val_y = np.empty((0, self.forecast_size, len(feature_names)))
         #Find which pigs/bvds stages are for training and create dataset with these features
-        train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages)
+        train_pairs, val_pairs = get_train_val_pairs(pigs_for_training, self.train_hypovolemia_stages, self.random_seed)
 
         # Create separate dataset for the training data
         for pair in train_pairs:
@@ -466,7 +467,7 @@ def get_timeseries_standardizer(data):
     std = np.std(data, axis=(0, 1), keepdims=True)
     return mean, std
 
-def get_train_val_pairs(subject_indices, hypovolemia_stages):
+def get_train_val_pairs(subject_indices, hypovolemia_stages, random_seed):
     # create pairs of subjects x hypovolemia stages
     # pick 20% and use them as validaiton
     # this one picks one hypovolemia stage directly - since there are 5 training pigs, it corresponds to 20% directly
@@ -588,6 +589,16 @@ def objective():
         data_dir = "/home/sliu/Desktop/Data"
     else:
         raise ValueError("Unknown environment")
+    
+    # Set random seed for reproducibility
+    random_seed = config.rand_seed # Also remember to change in get_train_val_pairs !!!
+    random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     mode = 'train'   # train or test
     # train - trains the model and saves the best model in terms of validation loss
@@ -641,6 +652,11 @@ def objective():
         #model run name timestamp for easy access
         model_run_str = time.strftime("%m%d-%H%M")
         wandb.log({"autoreg_model_str": model_run_str})
+        if forecast_size == 0:
+            wandb.run.name = model_run_str + "_autoenc"
+        else:
+            wandb.run.name = model_run_str
+        wandb.run.save()
         for test_pig_num in test_pig_nums:
             print(f"Training for Pig {test_pig_num} Started")
             # where you save your model
@@ -657,7 +673,8 @@ def objective():
                     all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                     batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, 
                     forecast_size=forecast_size, 
-                    direction=0 # direction 0 = backwards
+                    direction=0, # direction 0 = backwards,
+                    random_seed=random_seed
                     )
                 
                 # Creates Backwards-Predicting Autoregressor model 
@@ -669,7 +686,7 @@ def objective():
                     learning_rate=learning_rate, weight_decay=weight_decay, 
                     l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE, 
                     max_epochs=epochs, running_loss=running_loss, 
-                    direction=0 # direction 0 = backwards
+                    direction=0, # direction 0 = backwards
                     )
                 
                 # Checkpoint callback for Backwards Autoencoder
@@ -690,7 +707,8 @@ def objective():
                 test_hypovolemia_stages, batch_size=batch_size, 
                 overlap_percentage=overlap, window_size=window_size, 
                 forecast_size=forecast_size, 
-                direction=1 # direction 1 = forwards
+                direction=1, # direction 1 = forwards
+                random_seed=random_seed
                 )
             
             # Creates Forwards-Predicting Autoregressor Model OR Autoencoder if forecast=0
@@ -702,7 +720,7 @@ def objective():
                 learning_rate=learning_rate, weight_decay=weight_decay, 
                 l1_lambda=l1_lambda, dropout=dropout, device_to_use=DEVICE, 
                 max_epochs=epochs, running_loss=running_loss, 
-                direction=1 # direction 1 = forwards
+                direction=1, # direction 1 = forwards
                 ) 
             
             # Checkpoint callback for Forwards Autoregressor/Autoencoder
@@ -793,27 +811,42 @@ if __name__ == "__main__":
 
     # For Sweeps: Define the search space below
     sweep_configuration = {
-        "method": "random",
+        "method": "grid",
         "metric": {"goal": "minimize", "name": "mean_val_loss"},
         "parameters": {
             "learning_rate": {"values": [0.0001]},
-            "weight_decay": {"values": [0.00001, .0007]},
+            "weight_decay": {"values": [0.00001]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [128, 256]}, 
+            "hidden_size": {"values": [256]}, 
             "forecast_size": {"values": [0]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
-            "hidden_layer": {"values": [128, 64]}, # Keep at 0, unless you want multiple FC layers in DECODER
-            "num_layers": {"values": [1, 2]}, # Layers of LSTM 
+            "hidden_layer": {"values": [128]}, # Keep at 0, unless you want multiple FC layers in DECODER
+            "num_layers": {"values": [1]}, # Layers of LSTM 
             "dropout": {"values": [0]}, # Dropout rate
-            "window_size": {"values": [30, 60]}, # Timeseries window to train on
+            "window_size": {"values": [30]}, # Timeseries window to train on
+            "rand_seed": {"values": [42, 43, 44, 45]}
         },
+        # "parameters": {
+        #     "learning_rate": {"values": [0.0001]},
+        #     "weight_decay": {"values": [0.0007]},
+        #     "l1_lambda": {"values": [0]},
+        #     "hidden_size": {"values": [256]}, 
+        #     "forecast_size": {"values": [15]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
+        #     "overlap": {"values": [0.9]},
+        #     "epochs": {"values": [40]},
+        #     "hidden_layer": {"values": [128]}, # Keep at 0, unless you want multiple FC layers in DECODER
+        #     "num_layers": {"values": [2]}, # Layers of LSTM 
+        #     "dropout": {"values": [0]}, # Dropout rate
+        #     "window_size": {"values": [30]}, # Timeseries window to train on
+        #     "rand_seed": {"values": [42, 43, 44, 45]} # Random seeds
+        # },
     }
 
     # Initialize wandb for hyperparameter sweep
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=12)
+        wandb.agent(sweep_id, function=objective, count=4)
     else:
 
         # For Non-sweeps, edit hyperparameters for single runs
@@ -821,14 +854,15 @@ if __name__ == "__main__":
             "learning_rate": 0.0001,
             "weight_decay": 0.0007,
             "l1_lambda": 0.00000,
-            "hidden_size": 128,
-            "forecast_size": 0, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
+            "hidden_size": 256,
+            "forecast_size": 15, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
             "overlap": 0.9, # Percentage overlap of timeseries training windows
-            "epochs": 10,
-            "hidden_layer": 48, # Keep at 0, unless you want multiple FC layers in DECODER
-            "num_layers": 1, # Layers of LSTM 
+            "epochs": 40,
+            "hidden_layer": 128, # Keep at 0, unless you want multiple FC layers in DECODER
+            "num_layers": 2, # Layers of LSTM 
             "dropout": 0, # Dropout rate
-            "window_size": 30 # Timeseries window to train on
+            "window_size": 30, # Timeseries window to train on
+            "rand_seed": 42
         }, save_code=True)
 
         objective()
