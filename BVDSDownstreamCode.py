@@ -22,7 +22,7 @@ from pytorch_lightning.loggers import WandbLogger
 # Set random seed for reproducibility
 # NOTE: Seed MUST be IDENTICAL to one used in upstream LSTM!
 # OR ELSE train/val/test sets may differ in downstream which will lead to incorrect training
-random_seed = 42 # Set seed manually. Or comment out+import from LSTM code (not recommended)
+random_seed = 46 # Set seed manually. Or comment out+import from LSTM code (not recommended)
 random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
@@ -31,6 +31,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(random_seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+os.environ['PYTHONHASHSEED'] = str(random_seed)
 
 feature_names = ["hr", "hrvDifference", "hrvPoincare", "hrvSpectral",
      "scgPEP", "scgLVET", "scgPEPOverLVET", "scgPAT", "scgPTT",
@@ -789,7 +790,7 @@ def objective():
 
 if __name__ == "__main__":
     ###### Change to True to sweep of hyperparameters! #########
-    perform_sweep = True #change to True if want to run sweep of parameters
+    perform_sweep = False #change to True if want to run sweep of parameters
     wandbproject = "DownstreamBVDS"
     hostname = socket.gethostname()
 
@@ -824,7 +825,7 @@ if __name__ == "__main__":
             "learning_rate": 0.001,
             "weight_decay": 0.0005,
             "l1_lambda": 0.00,
-            "hidden_size": 256, #set to the same dimension as autoregressor!
+            "hidden_size": 128, #set to the same dimension as autoregressor!
             "forecast_size": 10, #placeholder, will load from autoreg model
             "overlap": 0.9,
             "epochs": 40,
@@ -832,7 +833,7 @@ if __name__ == "__main__":
             "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
             # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
-            "autoreg_model_str": '1228-0110',
+            "autoreg_model_str": '0107-1615',
         }, save_code=True)
         objective()
 

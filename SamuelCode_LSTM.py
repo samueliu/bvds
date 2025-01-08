@@ -599,6 +599,7 @@ def objective():
         torch.cuda.manual_seed_all(random_seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    os.environ['PYTHONHASHSEED'] = str(random_seed)
 
     mode = 'train'   # train or test
     # train - trains the model and saves the best model in terms of validation loss
@@ -817,15 +818,15 @@ if __name__ == "__main__":
             "learning_rate": {"values": [0.0001]},
             "weight_decay": {"values": [0.00001]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [256]}, 
-            "forecast_size": {"values": [0]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
+            "hidden_size": {"values": [128]}, 
+            "forecast_size": {"values": [10]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
             "hidden_layer": {"values": [128]}, # Keep at 0, unless you want multiple FC layers in DECODER
             "num_layers": {"values": [1]}, # Layers of LSTM 
             "dropout": {"values": [0]}, # Dropout rate
             "window_size": {"values": [30]}, # Timeseries window to train on
-            "rand_seed": {"values": [42, 43, 44, 45]}
+            "rand_seed": {"values": [42, 43, 44, 45, 46]}
         },
         # "parameters": {
         #     "learning_rate": {"values": [0.0001]},
@@ -846,13 +847,13 @@ if __name__ == "__main__":
     # Initialize wandb for hyperparameter sweep
     if perform_sweep:
         sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandbproject)
-        wandb.agent(sweep_id, function=objective, count=4)
+        wandb.agent(sweep_id, function=objective, count=5)
     else:
 
         # For Non-sweeps, edit hyperparameters for single runs
         wandb.init(project=wandbproject, config={
             "learning_rate": 0.0001,
-            "weight_decay": 0.0007,
+            "weight_decay": 0.00001,
             "l1_lambda": 0.00000,
             "hidden_size": 256,
             "forecast_size": 15, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
