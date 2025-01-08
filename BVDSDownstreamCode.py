@@ -7,7 +7,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import lightning as L
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from torch.utils.data import Dataset
 import random
 import sys
@@ -261,7 +261,7 @@ class MyDataModule(L.LightningDataModule):
         self.test = TimeSeriesDataset(test_X_std, test_y, self.test_hypo_stages)
 
     def train_dataloader(self):
-        return DataLoader(self.train, batch_size=self.batch_size, shuffle=True)
+        return DataLoader(self.train, batch_size=self.batch_size, shuffle=True) 
     def val_dataloader(self):
         return DataLoader(self.validate, batch_size=self.batch_size, shuffle=False)
     def test_dataloader(self):
@@ -269,7 +269,7 @@ class MyDataModule(L.LightningDataModule):
     #IMPORTANT: Change predict mode between train, val, test, etc.
     def predict_dataloader(self):
         if self.prediction_mode == 'train':
-            return DataLoader(self.train, batch_size=self.batch_size, shuffle=False)
+            return DataLoader(self.train, batch_size=self.batch_size, shuffle=False)#Should the shuffle be set to True?
         elif self.prediction_mode == 'val':
             return DataLoader(self.validate, batch_size=self.batch_size, shuffle=False)
         elif self.prediction_mode == 'test':
@@ -463,14 +463,14 @@ def get_filename_with_min_val_loss(directory, model_string, direction):
 
 def report_results(gt, predictions, hypovolemia_stages, results, subj_idx):
     # Find overall test results for each stage, pig, and average
-    overall_rmse = mean_squared_error(gt, predictions, squared=False)
+    overall_rmse = root_mean_squared_error(gt, predictions)
     unique_stages = list(np.unique(hypovolemia_stages))
     print("unique stages: ", unique_stages)
     results[subj_idx] = {}
     for stage in unique_stages:
         gt_stage = gt[hypovolemia_stages == stage]
         predictions_stage = predictions[hypovolemia_stages == stage]
-        stage_rmse = mean_squared_error(gt_stage, predictions_stage, squared=False)
+        stage_rmse = root_mean_squared_error(gt_stage, predictions_stage)
         print(f"{stage} RMSE score: ", stage_rmse)
         results[subj_idx][stage] = stage_rmse
     print("Overall RMSE score: ", overall_rmse)

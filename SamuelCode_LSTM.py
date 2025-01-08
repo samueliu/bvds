@@ -399,7 +399,7 @@ class MyDataModule(L.LightningDataModule):
         return DataLoader(self.test, batch_size=self.batch_size, shuffle=False)
     def predict_dataloader(self):
         if self.prediction_mode == 'train':
-            return DataLoader(self.train, batch_size=self.batch_size, shuffle=False)
+            return DataLoader(self.train, batch_size=self.batch_size, shuffle=False) #Should the shuffle be set to True?
         elif self.prediction_mode == 'val':
             return DataLoader(self.validate, batch_size=self.batch_size, shuffle=False)
         elif self.prediction_mode == 'test':
