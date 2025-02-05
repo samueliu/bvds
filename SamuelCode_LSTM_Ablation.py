@@ -7,7 +7,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import lightning as L
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from torch.utils.data import Dataset
 import random
 import sys
@@ -829,7 +829,7 @@ if __name__ == "__main__":
             "num_layers": {"values": [1]}, # Layers of LSTM 
             "dropout": {"values": [0]}, # Dropout rate
             "window_size": {"values": [30]}, # Timeseries window to train on
-            "rand_seed": {"values": [42, 43, 44, 45]},
+            "rand_seed": {"values": [46]},
             # Edit this for ablation study for forecast/backcast
             "ablation_mode": {"values": [0, 1]}, # Set ablation to 0 for forecast only, 1 for backcast only
         },

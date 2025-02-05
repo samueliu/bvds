@@ -22,7 +22,7 @@ from pytorch_lightning.loggers import WandbLogger
 # Set random seed for reproducibility
 # NOTE: Seed MUST be IDENTICAL to one used in upstream LSTM!
 # OR ELSE train/val/test sets may differ in downstream which will lead to incorrect training
-random_seed = 45 # Set seed manually. Or comment out+import from LSTM code (not recommended)
+random_seed = 46 # Set seed manually. Or comment out+import from LSTM code (not recommended)
 random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
@@ -766,7 +766,7 @@ def objective():
 
 if __name__ == "__main__":
     ###### Change to True to sweep of hyperparameters! #########
-    perform_sweep = True #change to True if want to run sweep of parameters
+    perform_sweep = False #change to True if want to run sweep of parameters
     hostname = socket.gethostname()
     wandbproject = "DownstreamBVDS"
     sweep_configuration = {
@@ -776,7 +776,7 @@ if __name__ == "__main__":
             "learning_rate": {"values": [0.001]},
             "weight_decay": {"values": [0.0005]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [256]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
+            "hidden_size": {"values": [128]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL!
             "forecast_size": {"values": [10]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
@@ -785,9 +785,8 @@ if __name__ == "__main__":
             "dropout": {"values": [0]},
             # IMPORTANT BELOW: names of upstream TRAINED LSTM models to use
             "autoreg_model_str": {"values": [
-                '0104-2259',
-                '0105-0031',
-                '0105-0121',
+                '0201-1606',
+                '0201-1618',
 
                 ]}
         },
@@ -803,15 +802,15 @@ if __name__ == "__main__":
             "learning_rate": 0.001,
             "weight_decay": 0.0005,
             "l1_lambda": 0.00,
-            "hidden_size": 256, #set to the same dimension as autoregressor!
-            "forecast_size": 10, #placeholder, will load from autoreg model
+            "hidden_size": 128, #set to the same dimension as autoregressor!
+            "forecast_size": 0, #placeholder, will load from autoreg model
             "overlap": 0.9,
             "epochs": 40,
             "hidden_layer": 64, #This is for the downstream fully connected layers if num_layers=2
             "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
             # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
-            "autoreg_model_str": '0105-0121',
+            "autoreg_model_str": '0201-2303',
         }, save_code=True)
         objective()
 

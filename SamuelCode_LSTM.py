@@ -7,7 +7,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import lightning as L
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from torch.utils.data import Dataset
 import random
 import sys
@@ -806,7 +806,7 @@ def objective():
 if __name__ == "__main__":
     
     ###### Change to True to sweep of hyperparameters! #########
-    perform_sweep = True 
+    perform_sweep = False 
     wandbproject = "RNNAutoregressor"
     ###########################################################
 
@@ -814,34 +814,34 @@ if __name__ == "__main__":
     sweep_configuration = {
         "method": "grid",
         "metric": {"goal": "minimize", "name": "mean_val_loss"},
-        "parameters": {
-            "learning_rate": {"values": [0.0001]},
-            "weight_decay": {"values": [0.00001]},
-            "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [128]}, 
-            "forecast_size": {"values": [10]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
-            "overlap": {"values": [0.9]},
-            "epochs": {"values": [40]},
-            "hidden_layer": {"values": [128]}, # Keep at 0, unless you want multiple FC layers in DECODER
-            "num_layers": {"values": [1]}, # Layers of LSTM 
-            "dropout": {"values": [0]}, # Dropout rate
-            "window_size": {"values": [30]}, # Timeseries window to train on
-            "rand_seed": {"values": [42, 43, 44, 45, 46]}
-        },
         # "parameters": {
         #     "learning_rate": {"values": [0.0001]},
-        #     "weight_decay": {"values": [0.0007]},
+        #     "weight_decay": {"values": [0.00001]},
         #     "l1_lambda": {"values": [0]},
         #     "hidden_size": {"values": [256]}, 
         #     "forecast_size": {"values": [15]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
         #     "overlap": {"values": [0.9]},
         #     "epochs": {"values": [40]},
         #     "hidden_layer": {"values": [128]}, # Keep at 0, unless you want multiple FC layers in DECODER
-        #     "num_layers": {"values": [2]}, # Layers of LSTM 
+        #     "num_layers": {"values": [1]}, # Layers of LSTM 
         #     "dropout": {"values": [0]}, # Dropout rate
         #     "window_size": {"values": [30]}, # Timeseries window to train on
-        #     "rand_seed": {"values": [42, 43, 44, 45]} # Random seeds
+        #     "rand_seed": {"values": [41, 45, 46]}
         # },
+        "parameters": {
+            "learning_rate": {"values": [0.0001]},
+            "weight_decay": {"values": [0.0007]},
+            "l1_lambda": {"values": [0]},
+            "hidden_size": {"values": [256]}, 
+            "forecast_size": {"values": [15]}, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
+            "overlap": {"values": [0.9]},
+            "epochs": {"values": [40]},
+            "hidden_layer": {"values": [128]}, # Keep at 0, unless you want multiple FC layers in DECODER
+            "num_layers": {"values": [1]}, # Layers of LSTM 
+            "dropout": {"values": [0]}, # Dropout rate
+            "window_size": {"values": [30]}, # Timeseries window to train on
+            "rand_seed": {"values": [45, 46]} # Random seeds
+        },
     }
 
     # Initialize wandb for hyperparameter sweep
@@ -855,15 +855,15 @@ if __name__ == "__main__":
             "learning_rate": 0.0001,
             "weight_decay": 0.00001,
             "l1_lambda": 0.00000,
-            "hidden_size": 256,
-            "forecast_size": 15, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
+            "hidden_size": 128,
+            "forecast_size": 0, # Set 0 for Autoencoder, >=1 for predictive Autoregressor
             "overlap": 0.9, # Percentage overlap of timeseries training windows
             "epochs": 40,
             "hidden_layer": 128, # Keep at 0, unless you want multiple FC layers in DECODER
-            "num_layers": 2, # Layers of LSTM 
+            "num_layers": 1, # Layers of LSTM 
             "dropout": 0, # Dropout rate
             "window_size": 30, # Timeseries window to train on
-            "rand_seed": 42
+            "rand_seed": 46
         }, save_code=True)
 
         objective()

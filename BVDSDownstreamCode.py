@@ -22,7 +22,7 @@ from pytorch_lightning.loggers import WandbLogger
 # Set random seed for reproducibility
 # NOTE: Seed MUST be IDENTICAL to one used in upstream LSTM!
 # OR ELSE train/val/test sets may differ in downstream which will lead to incorrect training
-random_seed = 46 # Set seed manually. Or comment out+import from LSTM code (not recommended)
+random_seed = 42 # Set seed manually. Or comment out+import from LSTM code (not recommended)
 random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
@@ -801,7 +801,7 @@ if __name__ == "__main__":
             "learning_rate": {"values": [0.001]},
             "weight_decay": {"values": [0.0005]},
             "l1_lambda": {"values": [0]},
-            "hidden_size": {"values": [256]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL! (Edit: will automatically)
+            "hidden_size": {"values": [128]}, #SET TO WHAT WAS ON AUTOREGRESSOR MODEL! (Edit: will automatically)
             "forecast_size": {"values": [10]},
             "overlap": {"values": [0.9]},
             "epochs": {"values": [40]},
@@ -810,8 +810,8 @@ if __name__ == "__main__":
             "dropout": {"values": [0]},
             # IMPORTANT BELOW: names of upstream TRAINED LSTM models to use
             "autoreg_model_str": {"values": [
-                '1229-0021', 
-                '1228-0110', 
+                '0201-1727', 
+                '0201-1631', 
                 ]}
         },
     }
@@ -833,7 +833,7 @@ if __name__ == "__main__":
             "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
             # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
-            "autoreg_model_str": '0107-1615',
+            "autoreg_model_str": '0201-2239',
         }, save_code=True)
         objective()
 
