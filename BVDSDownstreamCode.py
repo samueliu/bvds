@@ -7,8 +7,8 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import lightning as L
-from sklearn.metrics import root_mean_squared_error
 from torch.utils.data import Dataset
+from sklearn.metrics import mean_squared_error
 import random
 import sys
 import wandb
@@ -18,11 +18,13 @@ from SamuelCode_LSTM import RNNAutoregressor
 from pytorch_lightning.loggers import WandbLogger
 # from SamuelCode_LSTM import random_seed
 
-########################### Run Code for Forecast/Backcast ONLY #############################################
+########################### Downstream Code for Forecast/Backcast ONLY #############################################
+
 # Set random seed for reproducibility
 # NOTE: Seed MUST be IDENTICAL to one used in upstream LSTM!
 # OR ELSE train/val/test sets may differ in downstream which will lead to incorrect training
-random_seed = 42 # Set seed manually. Or comment out+import from LSTM code (not recommended)
+
+random_seed = 46 # Set seed manually. Or comment out+import from LSTM code (not recommended)
 random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
@@ -36,6 +38,9 @@ os.environ['PYTHONHASHSEED'] = str(random_seed)
 feature_names = ["hr", "hrvDifference", "hrvPoincare", "hrvSpectral",
      "scgPEP", "scgLVET", "scgPEPOverLVET", "scgPAT", "scgPTT",
      "ppgIHAT", "femoralPPGPPV", "ppgAmplitudeDistal"]
+rel_events = ["baseline_1", "vaso_1", "vaso_2", "vaso_3", "baseline_2"]
+abs_events = ["baseline_abs", "abs_0_7", "abs_7_14", "abs_14_21", "abs_21_28"]
+res_events = ["ref_28_21", "ref_21_14", "ref_14_7", "ref_7_0"]
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 classes_to_bvds_dict = {
         0: 0,
@@ -169,7 +174,9 @@ class MyDataModule(L.LightningDataModule):
         # these are here in case you want to train/test your model using certain stages
         self.data_directory = data_directory
         self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   # bvds_mode = 'classification' or 'regression' unchanged from original
-        self.label_name = 'Class' if bvds_mode=='classification' else 'BVDS' #kept this logic for future implementation for downstream task
+        
+        # NOTE: Can set this to be CO or BVDS value based on what we downstream task is...
+        self.label_name = 'Class' if bvds_mode=='classification' else 'bvds' #kept this logic for future implementation for downstream task
         self.num_pigs = num_pigs
         self.test_pig_num = test_pig_num
         self.all_hypovolemia_stages = all_hypovolemia_stages
@@ -192,17 +199,37 @@ class MyDataModule(L.LightningDataModule):
         self.data_dict = {}
         # data dict keys will be pig numbers\
         # each data_dict[pig_num] will be also a dictionary with key Absolute, Relative, Resuscitation
-        # each of these is also a dictionary with 2 keys 'features' and 'labels'
+        # each of these is also a dictionary with events, and within events are 2 keys 'features' and 'labels'
         for pig_idx in range(1, self.num_pigs + 1):  # traverse pigs
             self.data_dict[pig_idx] = {}
             for hypovolemia_stage in self.all_hypovolemia_stages:
                 self.data_dict[pig_idx][hypovolemia_stage] = {}
-                data_path = os.path.join(self.data_directory, hypovolemia_stage)
-                features = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
-                labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_{self.bvds_mode}.csv"))[self.label_name].values 
-                self.data_dict[pig_idx][hypovolemia_stage]['features'] = features
-                self.data_dict[pig_idx][hypovolemia_stage]['labels'] = labels
-        # now split into training, validation, and testing sets by pig/stage
+                # x: "features"
+                # y: "labels"
+                # Both features and labels are derived from timeseries for reconstruction
+                pig_path = os.path.join(self.data_directory, f"Pig{pig_idx}")
+                if hypovolemia_stage == "Relative": # cycle through the rel events
+                    events = rel_events 
+                elif hypovolemia_stage == "Absolute": # cycle through the abs events
+                    events = abs_events
+                else: # cycle through the res events
+                    events = res_events
+
+                stage_data = {}
+
+                for event in events:
+                    event_file = os.path.join(pig_path, f"{event}.csv")
+                    if os.path.isfile(event_file):
+                        # # Removed BVDS labels, since focus is on feature forecasting but kept for later implementation in downstream task
+                        labels = pd.read_csv(event_file)[self.label_name].values 
+                        features = pd.read_csv(event_file)[feature_names].values
+                        # Inside data dict, will be [pig][stage][event][features/labels]
+                        stage_data[event] = {
+                            'features': features,
+                            'labels': labels
+                        }
+                    
+                self.data_dict[pig_idx][hypovolemia_stage] = stage_data# now split into training, validation, and testing sets by pig/stage
         self.prepare_train_val_test()
 
     def prepare_train_val_test(self):
@@ -218,37 +245,51 @@ class MyDataModule(L.LightningDataModule):
         # training dataset
         for pair in train_pairs:
             (pig_idx, hypovolemia_stage) = pair
-            features = self.data_dict[pig_idx][hypovolemia_stage]['features']
-            labels = self.data_dict[pig_idx][hypovolemia_stage]['labels']
-            ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+            event_dict = self.data_dict[pig_idx][hypovolemia_stage]
+            for event, event_data in event_dict.items():
+                features = event_data['features']
+                labels = event_data['labels']
+                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage)
-            train_X = np.vstack((train_X, ts_features))
-            train_y = np.vstack((train_y, ts_labels.reshape(-1, 1)))
+                if ts_features.shape[0] == 0:
+                    continue
+                train_X = np.vstack((train_X, ts_features))
+                train_y = np.vstack((train_y, ts_labels.reshape(-1, 1)))
         # validation dataset
         for pair in val_pairs:
             (pig_idx, hypovolemia_stage) = pair
-            features = self.data_dict[pig_idx][hypovolemia_stage]['features']
-            labels = self.data_dict[pig_idx][hypovolemia_stage]['labels']
-            ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+            event_dict = self.data_dict[pig_idx][hypovolemia_stage]
+            for event, event_data in event_dict.items():
+                features = event_data['features']
+                labels = event_data['labels']
+                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage)
-            val_X = np.vstack((val_X, ts_features))
-            val_y = np.vstack((val_y, ts_labels.reshape(-1, 1)))
+                if ts_features.shape[0] == 0:
+                    continue
+                val_X = np.vstack((val_X, ts_features))
+                val_y = np.vstack((val_y, ts_labels.reshape(-1, 1)))
 
         # for the test pig
         test_X = np.empty((0, self.window_size, len(feature_names)))
         test_y = np.empty((0, 1))
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
-            features = self.data_dict[self.test_pig_num][hypovolemia_stage]['features']
-            labels = self.data_dict[self.test_pig_num][hypovolemia_stage]['labels']
-            ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+            # Retrieve the events dictionary for this stage, if it exists
+            event_dict = self.data_dict.get(self.test_pig_num, {}).get(hypovolemia_stage, {})
+
+            for event_name, event_data in event_dict.items():
+                features = event_data['features']
+                labels = event_data['labels']
+                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage)
-            self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
-            test_X = np.vstack((test_X, ts_features))
-            test_y = np.vstack((test_y, ts_labels.reshape(-1, 1)))
+                if ts_features.shape[0] == 0:
+                    continue
+                self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
+                test_X = np.vstack((test_X, ts_features))
+                test_y = np.vstack((test_y, ts_labels.reshape(-1, 1)))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
 
         mean, std = get_timeseries_standardizer(train_X) #changed to calculate mean, std from overall window (including forecast/backcast) for consistent normalization
@@ -463,14 +504,14 @@ def get_filename_with_min_val_loss(directory, model_string, direction):
 
 def report_results(gt, predictions, hypovolemia_stages, results, subj_idx):
     # Find overall test results for each stage, pig, and average
-    overall_rmse = root_mean_squared_error(gt, predictions)
+    overall_rmse = mean_squared_error(gt, predictions, squared=False)
     unique_stages = list(np.unique(hypovolemia_stages))
     print("unique stages: ", unique_stages)
     results[subj_idx] = {}
     for stage in unique_stages:
         gt_stage = gt[hypovolemia_stages == stage]
         predictions_stage = predictions[hypovolemia_stages == stage]
-        stage_rmse = root_mean_squared_error(gt_stage, predictions_stage)
+        stage_rmse = mean_squared_error(gt_stage, predictions_stage, squared=False)
         print(f"{stage} RMSE score: ", stage_rmse)
         results[subj_idx][stage] = stage_rmse
     print("Overall RMSE score: ", overall_rmse)
@@ -493,8 +534,11 @@ def objective():
     hostname = socket.gethostname()
     # Find data directory based on host machine (hardcoded to Samuel Liu's environments)
     if hostname == 'samue':
+        # Directory with code + model results
         project_dir = r"C:\\Users\\samue\\OneDrive - Georgia Institute of Technology\\GT Files\\ECE 8903 I02\\SamuelCode\\HypovolemiaSamuel"
-        data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\Samuel Liu\\HypovolemiaSamuel\\Data"
+        # Directory containing processed beatseries data
+        data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\ECE\\InanResearchLab\\DocumentedDatasets\\Hypovolemia\\COBVDSAlignedData\\Feature Beatseries (Normalized)"
+        # If machine is using the lab server, update directories accordingly
     elif hostname == 'jarvis':
         project_dir = "/home/sliu/Desktop/SamuelCode/bvds/HypovolemiaSamuel"
         data_dir = "/home/sliu/Desktop/Data"
@@ -833,7 +877,7 @@ if __name__ == "__main__":
             "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
             # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
-            "autoreg_model_str": '0201-2239',
+            "autoreg_model_str": '0616-0123',
         }, save_code=True)
         objective()
 

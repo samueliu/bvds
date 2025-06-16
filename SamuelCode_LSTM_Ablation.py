@@ -7,7 +7,6 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import lightning as L
-from sklearn.metrics import root_mean_squared_error
 from torch.utils.data import Dataset
 import random
 import sys
@@ -29,6 +28,10 @@ from pytorch_lightning.loggers import WandbLogger
 feature_names = ["hr", "hrvDifference", "hrvPoincare", "hrvSpectral",
      "scgPEP", "scgLVET", "scgPEPOverLVET", "scgPAT", "scgPTT",
      "ppgIHAT", "femoralPPGPPV", "ppgAmplitudeDistal"]
+rel_events = ["baseline_1", "vaso_1", "vaso_2", "vaso_3", "baseline_2"]
+abs_events = ["baseline_abs", "abs_0_7", "abs_7_14", "abs_14_21", "abs_21_28"]
+res_events = ["ref_28_21", "ref_21_14", "ref_14_7", "ref_7_0"]
+
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 classes_to_bvds_dict = {
         0: 0,
@@ -274,21 +277,37 @@ class MyDataModule(L.LightningDataModule):
         self.data_dict = {}
         # data dict keys will be pig numbers\
         # each data_dict[pig_num] will be also a dictionary with key Absolute, Relative, Resuscitation
-        # each of these is also a dictionary with 2 keys 'features' and 'labels'
+        # each of these is also a dictionary with events, and within events are 2 keys 'features' and 'labels'
         for pig_idx in range(1, self.num_pigs + 1):  # traverse pigs
             self.data_dict[pig_idx] = {}
             for hypovolemia_stage in self.all_hypovolemia_stages:
                 self.data_dict[pig_idx][hypovolemia_stage] = {}
-                data_path = os.path.join(self.data_directory, hypovolemia_stage)
                 # x: "features"
                 # y: "labels"
                 # Both features and labels are derived from timeseries for reconstruction
-                features = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
-                # # Removed BVDS labels, since focus is on feature forecasting but kept for later implementation in downstream task
-                # labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_{self.bvds_mode}.csv"))[self.label_name].values 
-                labels = pd.read_csv(os.path.join(data_path, f"pig_{pig_idx}_features.csv"))[feature_names].values
-                self.data_dict[pig_idx][hypovolemia_stage]['features'] = features
-                self.data_dict[pig_idx][hypovolemia_stage]['labels'] = labels
+                pig_path = os.path.join(self.data_directory, f"Pig{pig_idx}")
+                if hypovolemia_stage == "Relative": # cycle through the rel events
+                    events = rel_events 
+                elif hypovolemia_stage == "Absolute": # cycle through the abs events
+                    events = abs_events
+                else: # cycle through the res events
+                    events = res_events
+
+                stage_data = {}
+
+                for event in events:
+                    event_file = os.path.join(pig_path, f"{event}.csv")
+                    if os.path.isfile(event_file):
+                        # # Removed BVDS labels, since focus is on feature forecasting but kept for later implementation in downstream task
+                        # labels =pd.read_csv(event_file)[self.label_name].values 
+                        features = pd.read_csv(event_file)[feature_names].values
+                        # Inside data dict, will be [pig][stage][event][features/labels]
+                        stage_data[event] = {
+                            'features': features,
+                            'labels': features
+                        }
+                    
+                self.data_dict[pig_idx][hypovolemia_stage] = stage_data
         # now split into training, validation, and testing sets by pig/stage
         self.prepare_train_val_test()
 
@@ -317,34 +336,42 @@ class MyDataModule(L.LightningDataModule):
         # Create separate dataset for the training data
         for pair in train_pairs:
             (pig_idx, hypovolemia_stage) = pair
-            features = self.data_dict[pig_idx][hypovolemia_stage]['features']
-            labels = self.data_dict[pig_idx][hypovolemia_stage]['labels']
-            ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+            event_dict = self.data_dict[pig_idx][hypovolemia_stage]
+            for event, event_data in event_dict.items():
+                features = event_data['features']
+                labels = event_data['labels']
+                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
                                                                            forecast_size=self.forecast_size, 
                                                                            direction=self.direction)
-            train_X = np.vstack((train_X, ts_features))
-            if self.forecast_size == 0:
-                train_y = np.vstack((train_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
-            else:
-                train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+                if ts_features.shape[0] == 0:
+                    continue
+                train_X = np.vstack((train_X, ts_features))
+                if self.forecast_size == 0:
+                    train_y = np.vstack((train_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
+                else:
+                    train_y = np.vstack((train_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
         # Create separate dataset for the validation data
         for pair in val_pairs:
             (pig_idx, hypovolemia_stage) = pair
-            features = self.data_dict[pig_idx][hypovolemia_stage]['features']
-            labels = self.data_dict[pig_idx][hypovolemia_stage]['labels']
-            ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+            event_dict = self.data_dict[pig_idx][hypovolemia_stage]
+            for event, event_data in event_dict.items():
+                features = event_data['features']
+                labels = event_data['labels']
+                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
                                                                            time_steps=self.window_size,
                                                                            overlap_percentage=self.overlap_percentage,
                                                                            forecast_size=self.forecast_size, 
                                                                            direction=self.direction)
-            val_X = np.vstack((val_X, ts_features))
-            if self.forecast_size == 0:
-                val_y = np.vstack((val_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
-            else:
-                val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+                if ts_features.shape[0] == 0:
+                    continue
+                val_X = np.vstack((val_X, ts_features))
+                if self.forecast_size == 0:
+                    val_y = np.vstack((val_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
+                else:
+                    val_y = np.vstack((val_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
 
 
         # For the test pig, create another dataset:
@@ -356,20 +383,26 @@ class MyDataModule(L.LightningDataModule):
 
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
-            features = self.data_dict[self.test_pig_num][hypovolemia_stage]['features']
-            labels = self.data_dict[self.test_pig_num][hypovolemia_stage]['labels']
-            ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
-                                                                           time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage,
-                                                                           forecast_size=self.forecast_size, 
-                                                                           direction=self.direction)
-            self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
+            # Retrieve the events dictionary for this stage, if it exists
+            event_dict = self.data_dict.get(self.test_pig_num, {}).get(hypovolemia_stage, {})
 
-            test_X = np.vstack((test_X, ts_features))
-            if self.forecast_size == 0:
-                test_y = np.vstack((test_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
-            else:
-                test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
+            for event_name, event_data in event_dict.items():
+                features = event_data['features']
+                labels = event_data['labels']
+                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+                                                                            time_steps=self.window_size,
+                                                                            overlap_percentage=self.overlap_percentage,
+                                                                            forecast_size=self.forecast_size, 
+                                                                            direction=self.direction)
+                if ts_features.shape[0] == 0:
+                    continue
+                self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
+
+                test_X = np.vstack((test_X, ts_features))
+                if self.forecast_size == 0:
+                    test_y = np.vstack((test_y, ts_labels.reshape(-1, self.window_size, len(feature_names))))
+                else:
+                    test_y = np.vstack((test_y, ts_labels.reshape(-1, self.forecast_size, len(feature_names))))
         self.test_hypo_stages = np.array(self.test_hypo_stages)
 
         print("Train x shape: ", train_X.shape)
@@ -582,8 +615,11 @@ def objective():
     hostname = socket.gethostname()
     # Find data directory based on host machine (hardcoded to Samuel Liu's environments)
     if hostname == 'samue':
+        # Directory with code + model results
         project_dir = r"C:\\Users\\samue\\OneDrive - Georgia Institute of Technology\\GT Files\\ECE 8903 I02\\SamuelCode\\HypovolemiaSamuel"
-        data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\Samuel Liu\\HypovolemiaSamuel\\Data"
+        # Directory containing processed beatseries data
+        data_dir = r"C:\\Users\\samue\\GaTech Dropbox\\ECE\\InanResearchLab\\DocumentedDatasets\\Hypovolemia\\COBVDSAlignedData\\Feature Beatseries (Normalized)"
+    # If machine is using the lab server, update directories accordingly
     elif hostname == 'jarvis':
         project_dir = "/home/sliu/Desktop/SamuelCode/bvds/HypovolemiaSamuel"
         data_dir = "/home/sliu/Desktop/Data"
