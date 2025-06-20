@@ -399,7 +399,7 @@ class MyDataModule(L.LightningDataModule):
                     overlap_percentage=self.overlap_percentage,
                     forecast_size=self.forecast_size, 
                     direction=self.direction)
-                if ts_features.shape[0] == 0:
+                if ts_features.shape[0] == 0: # Add logic for if no CO labels
                     continue
                 self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
 

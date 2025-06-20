@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import lightning as L
 from torch.utils.data import Dataset
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 import random
 import sys
 import wandb
@@ -166,17 +166,17 @@ class MyDataModule(L.LightningDataModule):
     # BVSD features were not loaded in LSTM DataLoader, 
     # so they are recreated here with identical train/val/test partitions
 
-    def __init__(self, data_directory, num_pigs, test_pig_num, bvds_mode,
+    def __init__(self, data_directory, num_pigs, test_pig_num, training_mode, label_name,
                  all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                  batch_size=64, overlap_percentage=0.5, window_size = 30, forecast_size=15):
         super().__init__()
         # train/test_hypovolemia_stages = ['Absolute', 'Relative', 'Resuscitation']
         # these are here in case you want to train/test your model using certain stages
         self.data_directory = data_directory
-        self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   # bvds_mode = 'classification' or 'regression' unchanged from original
+        self.training_mode = training_mode   # training_mode = 'classification' or 'regression' unchanged from original
         
         # NOTE: Can set this to be CO or BVDS value based on what we downstream task is...
-        self.label_name = 'Class' if bvds_mode=='classification' else 'bvds' #kept this logic for future implementation for downstream task
+        self.label_name = label_name #kept this logic for future implementation for downstream task
         self.num_pigs = num_pigs
         self.test_pig_num = test_pig_num
         self.all_hypovolemia_stages = all_hypovolemia_stages
@@ -220,7 +220,6 @@ class MyDataModule(L.LightningDataModule):
                 for event in events:
                     event_file = os.path.join(pig_path, f"{event}.csv")
                     if os.path.isfile(event_file):
-                        # # Removed BVDS labels, since focus is on feature forecasting but kept for later implementation in downstream task
                         labels = pd.read_csv(event_file)[self.label_name].values 
                         features = pd.read_csv(event_file)[feature_names].values
                         # Inside data dict, will be [pig][stage][event][features/labels]
@@ -250,9 +249,10 @@ class MyDataModule(L.LightningDataModule):
                 features = event_data['features']
                 labels = event_data['labels']
                 ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
-                                                                           time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage)
-                if ts_features.shape[0] == 0:
+                    time_steps=self.window_size,
+                    overlap_percentage=self.overlap_percentage,
+                    forecast_size=self.forecast_size)
+                if ts_features.shape[0] == 0 or ts_labels.shape[0] == 0:
                     continue
                 train_X = np.vstack((train_X, ts_features))
                 train_y = np.vstack((train_y, ts_labels.reshape(-1, 1)))
@@ -263,10 +263,11 @@ class MyDataModule(L.LightningDataModule):
             for event, event_data in event_dict.items():
                 features = event_data['features']
                 labels = event_data['labels']
-                ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
-                                                                           time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage)
-                if ts_features.shape[0] == 0:
+                ts_features, ts_labels = ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
+                    time_steps=self.window_size,
+                    overlap_percentage=self.overlap_percentage,
+                    forecast_size=self.forecast_size)
+                if ts_features.shape[0] == 0 or ts_labels.shape[0] == 0:
                     continue
                 val_X = np.vstack((val_X, ts_features))
                 val_y = np.vstack((val_y, ts_labels.reshape(-1, 1)))
@@ -274,6 +275,7 @@ class MyDataModule(L.LightningDataModule):
         # for the test pig
         test_X = np.empty((0, self.window_size, len(feature_names)))
         test_y = np.empty((0, 1))
+
         self.test_hypo_stages = []
         for hypovolemia_stage in self.test_hypovolemia_stages:
             # Retrieve the events dictionary for this stage, if it exists
@@ -283,9 +285,10 @@ class MyDataModule(L.LightningDataModule):
                 features = event_data['features']
                 labels = event_data['labels']
                 ts_features, ts_labels = create_timeseries_dataset_with_labels(features, labels,
-                                                                           time_steps=self.window_size,
-                                                                           overlap_percentage=self.overlap_percentage)
-                if ts_features.shape[0] == 0:
+                    time_steps=self.window_size,
+                    overlap_percentage=self.overlap_percentage,
+                    forecast_size=self.forecast_size)
+                if ts_features.shape[0] == 0 or ts_labels.shape[0] == 0:
                     continue
                 self.test_hypo_stages = self.test_hypo_stages + [hypovolemia_stage for _ in range(len(ts_features))]
                 test_X = np.vstack((test_X, ts_features))
@@ -321,14 +324,14 @@ class DownstreamDataModule(L.LightningDataModule):
     # And the same BVDS y labels from the previous dataloader
     # Will be used in BVDS downstream regressor
     def __init__(self, encoded_predictions_train, bvds_labels_train, encoded_predictions_val, bvds_labels_val,
-                  encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, bvds_mode,
-                 all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
+                  encoded_predictions_test, bvds_labels_test, bvds_hypo_stages_test, num_pigs, test_pig_num, training_mode,
+                 all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages, label_name,
                  batch_size=64):
         super().__init__()
         # train/test_hypovolemia_stages = ['Absolute', 'Relative', 'Resuscitation']
         # these are here in case you want to train/test your model using certain stages
-        self.bvds_mode = 'classes' if bvds_mode=='classification' else 'labels'   # bvds_mode = 'classification' or 'regression' unchanged from original
-        self.label_name = 'Class' if bvds_mode=='classification' else 'BVDS' #kept this logic for future implementation for downstream task
+        self.training_mode = 'classes' if training_mode=='classification' else 'labels'   # training_mode = 'classification' or 'regression' unchanged from original
+        self.label_name = label_name #kept this logic for future implementation for downstream task
         self.num_pigs = num_pigs
         self.test_pig_num = test_pig_num
         # "Hyperparameters" that are from the previous DataLoader or
@@ -383,7 +386,7 @@ class DownstreamDataModule(L.LightningDataModule):
         return DataLoader(self.test, batch_size=self.batch_size, shuffle=False)
 
 
-def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_percentage):
+def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_percentage, forecast_size):
     """
     Creates a timeseries dataset from the given data along with corresponding labels.
     This one assumes that if a certain window contain more than one label, that window is dropped
@@ -408,7 +411,7 @@ def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_perc
     step_size = time_steps - overlap_steps
 
     # Calculate the number of samples
-    num_windows = (num_samples - time_steps) // step_size + 1
+    num_windows = (num_samples - time_steps - 2 * forecast_size) // step_size + 1
 
     # Initialize lists to store valid windows and their labels
     valid_windows = []
@@ -416,7 +419,7 @@ def create_timeseries_dataset_with_labels(data, labels, time_steps, overlap_perc
 
     # Populate the timeseries dataset and labels
     for i in range(num_windows):
-        start_idx = i * step_size
+        start_idx = i * step_size + forecast_size
         end_idx = start_idx + time_steps
         window_data = data[start_idx:end_idx]
         window_labels = labels[start_idx:end_idx]
@@ -466,8 +469,8 @@ def get_train_val_pairs(subject_indices, hypovolemia_stages):
 
     # Flatten the remaining pairs for training set
     train_pairs = [pair for sublist in hypo_stage_pairs.values() for pair in sublist]
-    # print("Train pairs:", train_pairs)
-    # print("Validation pairs:", val_pairs)
+    print("Train pairs:", train_pairs)
+    print("Validation pairs:", val_pairs)
 
     return train_pairs, val_pairs
 
@@ -504,14 +507,14 @@ def get_filename_with_min_val_loss(directory, model_string, direction):
 
 def report_results(gt, predictions, hypovolemia_stages, results, subj_idx):
     # Find overall test results for each stage, pig, and average
-    overall_rmse = mean_squared_error(gt, predictions, squared=False)
+    overall_rmse = root_mean_squared_error(gt, predictions, squared=False)
     unique_stages = list(np.unique(hypovolemia_stages))
     print("unique stages: ", unique_stages)
     results[subj_idx] = {}
     for stage in unique_stages:
         gt_stage = gt[hypovolemia_stages == stage]
         predictions_stage = predictions[hypovolemia_stages == stage]
-        stage_rmse = mean_squared_error(gt_stage, predictions_stage, squared=False)
+        stage_rmse = root_mean_squared_error(gt_stage, predictions_stage, squared=False)
         print(f"{stage} RMSE score: ", stage_rmse)
         results[subj_idx][stage] = stage_rmse
     print("Overall RMSE score: ", overall_rmse)
@@ -554,7 +557,7 @@ def objective():
     # UNLESS model_str designates which BVDS downstream model to use
     bvds_model_str = '0907-2312' # string representing bvds DOWNSTREAM model ran with specific architecture.
 
-    training_mode = 'regression'  # regression or classification
+    training_mode = 'regression'  # bvds or CO
     # regression maps to [0, 100] interval
     # classification maps to {0, 25, 33, 50, 67, 75, 100}
 
@@ -585,6 +588,7 @@ def objective():
     dropout = config.dropout
     epochs = config.epochs
     overlap = config.overlap
+    label_name = config.label_name
 
     # string representing autoregressor model ran with specific architecture. 
     # For example '0725-0124' is the model ran on 07/25 at 1:24. leave blank if want to search.
@@ -646,7 +650,7 @@ def objective():
             # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
             window_size = autoreg_model_f.window_size
             forecast_size = autoreg_model_f.forecast_size
-            data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+            data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode, label_name,
                             all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                             batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
 
@@ -691,7 +695,7 @@ def objective():
                 bvds_hypo_stages_test, num_pigs, 
                 test_pig_num, training_mode, 
                 all_hypovolemia_stages, train_hypovolemia_stages, 
-                test_hypovolemia_stages, batch_size=batch_size
+                test_hypovolemia_stages, label_name=label_name, batch_size=batch_size
                 )
 
             # Initialize downstream regressor model
@@ -741,7 +745,7 @@ def objective():
         # Create DataLoader that will be fed into upstream LSTM encoder to get intermediate output
         window_size = autoreg_model_f.window_size
         forecast_size = autoreg_model_f.forecast_size
-        data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode,
+        data_module = MyDataModule(data_dir, num_pigs, test_pig_num, training_mode, label_name,
                         all_hypovolemia_stages, train_hypovolemia_stages, test_hypovolemia_stages,
                         batch_size=batch_size, overlap_percentage=overlap, window_size=window_size, forecast_size=forecast_size)
 
@@ -781,7 +785,7 @@ def objective():
             encoded_predictions_test, bvds_labels_test, 
             bvds_hypo_stages_test, num_pigs, test_pig_num, 
             training_mode, all_hypovolemia_stages, 
-            train_hypovolemia_stages, test_hypovolemia_stages, 
+            train_hypovolemia_stages, test_hypovolemia_stages, label_name,
             batch_size=batch_size
             )
         
@@ -852,6 +856,7 @@ if __name__ == "__main__":
             "hidden_layer": {"values": [64]}, #This is for the downstream fully connected layers if num_layers=2
             "num_layers": {"values": [2]}, #This is for the downstream fully connected layers
             "dropout": {"values": [0]},
+            "label_name": {"values": ['bvds']},
             # IMPORTANT BELOW: names of upstream TRAINED LSTM models to use
             "autoreg_model_str": {"values": [
                 '0201-1727', 
@@ -876,6 +881,7 @@ if __name__ == "__main__":
             "hidden_layer": 64, #This is for the downstream fully connected layers if num_layers=2
             "num_layers": 2, #This is for the downstream fully connected layers
             "dropout": 0,
+            "label_name": 'bvds',
             # IMPORTANT BELOW: name of upstream TRAINED LSTM model to use
             "autoreg_model_str": '0616-0123',
         }, save_code=True)
